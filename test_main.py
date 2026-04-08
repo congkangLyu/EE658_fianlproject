@@ -1,5 +1,3 @@
-# Do NOT change this file.
-
 import os
 from utils import print_test_title, pars_args, prepare_env
 

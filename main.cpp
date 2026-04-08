@@ -1,4 +1,21 @@
-#include "readckt.cpp"
+#include "globals.h"
+#include "readckt.h"
+#include "help.h"
+#include "quit.h"
+#include "lev.h"
+#include "logicsim.h"
+#include "rtpg.h"
+#include "rfl.h"
+#include "dfs.h"
+#include "pfs.h"
+#include "tpfc.h"
+#include "scoap.h"
+#include "dlag.h"
+#include "podem.h"
+#include "tpg.h"
+#include <stdio.h>
+#include <cstdlib>
+#include <cstring>
 
 int main(int argc, char *argv[])
 {
