@@ -67,8 +67,8 @@ def pars_args():
 def prepare_env(args):
     """download tests/create folders"""
     if args.tb == "EZ": ZIP_NAME = "auto-tests-phase3-v2401-EZ.zip"
-    # elif args.tb == "IM": ZIP_NAME = "auto-tests-phase3-v2401-IM.zip"
-    # elif args.tb == "HD": ZIP_NAME = "auto-tests-phase3-v2401-HD.zip"
+    elif args.tb == "IM": ZIP_NAME = "auto-tests-phase3-v2401-IM.zip"
+    elif args.tb == "HD": ZIP_NAME = "auto-tests-phase3-v2401-HD.zip"
  
     os.system(f"rm -rf {TEST_DIR}")
     os.system(f"mkdir {TEST_DIR}")
