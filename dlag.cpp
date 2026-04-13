@@ -102,19 +102,43 @@ bool dlag_has_possible_propagation(const std::vector<int> &assign, int fault_nod
     return false;
 }
 
+static int backtrack_count;
+static const int MAX_BACKTRACKS = 100000;
+
 bool dlag_backtrack_search(const std::vector<int> &order,
                                   int depth,
                                   std::vector<int> &assign,
                                   int fault_node_num,
                                   int stuck_at,
                                   std::vector<int> &solution) {
-    if (!dlag_can_still_activate(assign, fault_node_num, stuck_at)) return false;
-    if (!dlag_has_possible_propagation(assign, fault_node_num, stuck_at)) return false;
+    if (++backtrack_count > MAX_BACKTRACKS) return false;  // abort: search space too large
 
-    if (dlag_pattern_detects_fault(assign, fault_node_num, stuck_at)) {
+    // Single simulation for all three checks (was 3 separate simulations before)
+    DlagSimResult sim = dlag_simulate_pattern(assign, fault_node_num, stuck_at);
+
+    // Check 1: can the fault still be activated?
+    int fault_idx = dlag_node_index_by_num(fault_node_num);
+    if (fault_idx >= 0) {
+        int g = sim.good[fault_idx];
+        int f = sim.faulty[fault_idx];
+        if (g != LX && f != LX && g == f) return false;  // fault cannot activate
+    }
+
+    // Check 2 & 3: propagation possible? already detected?
+    bool detected = false;
+    bool any_po_possible = false;
+    for (int i = 0; i < Npo; i++) {
+        int idx = Poutput[i]->indx;
+        int g = sim.good[idx];
+        int f = sim.faulty[idx];
+        if (g != LX && f != LX && g != f) { detected = true; break; }
+        if (g == LX || f == LX) any_po_possible = true;
+    }
+    if (detected) {
         solution = assign;
         return true;
     }
+    if (!any_po_possible) return false;  // no PO can show a difference
 
     if (depth >= (int)order.size()) return false;
 
@@ -263,7 +287,9 @@ void dlag_compute_scoap_internal() {
     }
 
     done = false;
+    int co_iters = 0;
     while (!done) {
+        if (++co_iters > Nnodes + 1) break;  // safety: avoid infinite loop on dangling nodes
         done = true;
         for (int i = 0; i < Nnodes; i++) {
             NSTRUC *np = &Node[i];
@@ -356,6 +382,7 @@ void dlag() {
 
     std::vector<int> assign(Npi, LX);
     std::vector<int> solution;
+    backtrack_count = 0;
     bool ok = dlag_backtrack_search(order, 0, assign, fault_num, sa_val, solution);
 
     if (!ok) {
