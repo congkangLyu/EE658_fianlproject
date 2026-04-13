@@ -1,3 +1,4 @@
+
 #include "dlag.h"
 #include "globals.h"
 #include "utils.h"
@@ -12,6 +13,8 @@
 #include <queue>
 #include <limits>
 #include <numeric>
+#include <ctime>
+#include <random>
 
 // Make these functions non-static so tpg.cpp can use them
 int dlag_node_index_by_num(int node_num) {
@@ -24,6 +27,16 @@ struct DlagSimResult {
     std::vector<int> good;
     std::vector<int> faulty;
 };
+
+static int backtrack_count;
+static const int MAX_BACKTRACKS = 5000;
+static const int MAX_SEARCH_DEPTH = 24;
+static const double MAX_SEARCH_SEC = 1.5;
+static clock_t dlag_search_start;
+
+static inline bool dlag_time_exceeded() {
+    return (double)(clock() - dlag_search_start) / CLOCKS_PER_SEC > MAX_SEARCH_SEC;
+}
 
 DlagSimResult dlag_simulate_pattern(const std::vector<int> &assign, int fault_node_num, int stuck_at) {
     DlagSimResult res;
@@ -82,102 +95,64 @@ bool dlag_pattern_detects_fault(const std::vector<int> &assign, int fault_node_n
     return false;
 }
 
-bool dlag_can_still_activate(const std::vector<int> &assign, int fault_node_num, int stuck_at) {
-    int fault_idx = dlag_node_index_by_num(fault_node_num);
-    if (fault_idx < 0) return false;
-    DlagSimResult sim = dlag_simulate_pattern(assign, fault_node_num, stuck_at);
-    int g = sim.good[fault_idx];
-    int f = sim.faulty[fault_idx];
-    if (g != LX && f != LX && g != f) return true;
-    return (g == LX || f == LX);
-}
-
-bool dlag_has_possible_propagation(const std::vector<int> &assign, int fault_node_num, int stuck_at) {
-    DlagSimResult sim = dlag_simulate_pattern(assign, fault_node_num, stuck_at);
-    for (int i = 0; i < Npo; i++) {
-        int idx = Poutput[i]->indx;
-        int g = sim.good[idx];
-        int f = sim.faulty[idx];
-        if (g != LX && f != LX && g != f) return true;
-        if (g == LX || f == LX) return true;
-    }
-    return false;
-}
-
-static int backtrack_count;
-static const int MAX_BACKTRACKS = 5000;
-
-static void dlag_mark_fanout_cone(int start_idx, std::vector<char> &in_fanout_cone) {
-    if (start_idx < 0 || start_idx >= Nnodes) return;
-    std::queue<int> q;
-    q.push(start_idx);
-    in_fanout_cone[start_idx] = 1;
-    while (!q.empty()) {
-        int cur = q.front();
-        q.pop();
-        NSTRUC *np = &Node[cur];
-        for (unsigned i = 0; i < np->fout; i++) {
-            NSTRUC *dn = np->dnodes[i];
-            if (!dn) continue;
-            int nxt = dn->indx;
-            if (nxt < 0 || nxt >= Nnodes || in_fanout_cone[nxt]) continue;
-            in_fanout_cone[nxt] = 1;
-            q.push(nxt);
-        }
-    }
-}
-
-static void dlag_collect_support_pis(int node_idx,
-                                     const std::vector<char> &in_fanout_cone,
-                                     std::vector<char> &visited_back,
-                                     std::vector<char> &relevant_pi) {
-    if (node_idx < 0 || node_idx >= Nnodes) return;
-    if (visited_back[node_idx]) return;
-    visited_back[node_idx] = 1;
-
-    NSTRUC *np = &Node[node_idx];
-    if (np->ntype == PI) {
-        for (int i = 0; i < Npi; i++) {
-            if (Pinput[i]->indx == node_idx) {
-                relevant_pi[i] = 1;
-                break;
-            }
-        }
-        return;
-    }
-
-    for (unsigned i = 0; i < np->fin; i++) {
-        NSTRUC *up = np->unodes[i];
-        if (!up) continue;
-        int up_idx = up->indx;
-        if (up_idx < 0 || up_idx >= Nnodes) continue;
-        if (!in_fanout_cone[up_idx] && up->ntype != PI) continue;
-        dlag_collect_support_pis(up_idx, in_fanout_cone, visited_back, relevant_pi);
-    }
-}
-
 static std::vector<int> dlag_build_relevant_pi_order(int fault_node_num) {
     std::vector<int> order;
     int fault_idx = dlag_node_index_by_num(fault_node_num);
-    if (fault_idx < 0) return order;
+    if (fault_idx < 0) {
+        for (int i = 0; i < Npi; i++) order.push_back(i);
+        return order;
+    }
 
-    std::vector<char> in_fanout_cone(Nnodes, 0);
-    dlag_mark_fanout_cone(fault_idx, in_fanout_cone);
+    // 1) forward cone from fault to find reachable PO region
+    std::vector<char> reach_from_fault(Nnodes, 0);
+    std::queue<int> q;
+    q.push(fault_idx);
+    reach_from_fault[fault_idx] = 1;
+    while (!q.empty()) {
+        int u = q.front();
+        q.pop();
+        NSTRUC *np = &Node[u];
+        for (unsigned k = 0; k < np->fout; k++) {
+            int v = np->dnodes[k]->indx;
+            if (!reach_from_fault[v]) {
+                reach_from_fault[v] = 1;
+                q.push(v);
+            }
+        }
+    }
 
-    std::vector<char> visited_back(Nnodes, 0);
-    std::vector<char> relevant_pi(Npi, 0);
-
+    // 2) backward from reachable POs to collect all PI ancestors that can matter
+    std::vector<char> needed(Nnodes, 0);
+    std::queue<int> qb;
     for (int i = 0; i < Npo; i++) {
-        int po_idx = Poutput[i]->indx;
-        if (po_idx >= 0 && po_idx < Nnodes && in_fanout_cone[po_idx]) {
-            dlag_collect_support_pis(po_idx, in_fanout_cone, visited_back, relevant_pi);
+        int idx = Poutput[i]->indx;
+        if (reach_from_fault[idx]) {
+            needed[idx] = 1;
+            qb.push(idx);
+        }
+    }
+
+    std::unordered_set<int> pi_set;
+    while (!qb.empty()) {
+        int u = qb.front();
+        qb.pop();
+        NSTRUC *np = &Node[u];
+        if (np->ntype == PI) {
+            pi_set.insert(u);
+            continue;
+        }
+        for (unsigned k = 0; k < np->fin; k++) {
+            int p = np->unodes[k]->indx;
+            if (!needed[p]) {
+                needed[p] = 1;
+                qb.push(p);
+            }
         }
     }
 
     for (int i = 0; i < Npi; i++) {
-        if (relevant_pi[i]) order.push_back(i);
+        if (pi_set.count(Pinput[i]->indx)) order.push_back(i);
     }
-
     if (order.empty()) {
         for (int i = 0; i < Npi; i++) order.push_back(i);
     }
@@ -190,64 +165,110 @@ static std::vector<int> dlag_build_relevant_pi_order(int fault_node_num) {
         if (ca != cb) return ca < cb;
         return pa->num < pb->num;
     });
-
     return order;
 }
 
-static bool dlag_fault_already_blocked(const DlagSimResult &sim, int fault_node_num) {
-    int fault_idx = dlag_node_index_by_num(fault_node_num);
-    if (fault_idx < 0) return true;
-    int g = sim.good[fault_idx];
-    int f = sim.faulty[fault_idx];
-    return (g != LX && f != LX && g == f);
-}
+static bool dlag_try_guided_random(const std::vector<int> &order,
+                                   int fault_node_num,
+                                   int stuck_at,
+                                   std::vector<int> &solution) {
+    std::mt19937 rng((unsigned)time(nullptr));
+    std::uniform_int_distribution<int> bit(0, 1);
 
-static bool dlag_any_output_still_possible(const DlagSimResult &sim) {
-    for (int i = 0; i < Npo; i++) {
-        int idx = Poutput[i]->indx;
-        int g = sim.good[idx];
-        int f = sim.faulty[idx];
-        if (g != LX && f != LX && g != f) return true;
-        if (g == LX || f == LX) return true;
-    }
-    return false;
-}
+    const int trials = 256;
+    std::vector<int> assign(Npi, LX);
 
-static bool dlag_fault_detected_at_po(const DlagSimResult &sim) {
-    for (int i = 0; i < Npo; i++) {
-        int idx = Poutput[i]->indx;
-        int g = sim.good[idx];
-        int f = sim.faulty[idx];
-        if (g != LX && f != LX && g != f) return true;
+    for (int t = 0; t < trials; t++) {
+        if (dlag_time_exceeded()) return false;
+        std::fill(assign.begin(), assign.end(), LX);
+
+        for (int pos = 0; pos < (int)order.size() && pos < MAX_SEARCH_DEPTH; pos++) {
+            int pi_idx = order[pos];
+            int v = bit(rng);
+
+            if ((int)Pinput[pi_idx]->num == fault_node_num) {
+                v = 1 - stuck_at;
+            } else {
+                int cc0 = Pinput[pi_idx]->scoap.CC0;
+                int cc1 = Pinput[pi_idx]->scoap.CC1;
+                int preferred = (cc1 >= 0 && cc0 >= 0 && cc1 < cc0) ? 1 : 0;
+
+                // Mostly choose the preferred easy value, but allow randomness.
+                if ((t & 3) != 0) v = preferred;
+            }
+            assign[pi_idx] = v;
+        }
+
+        if (dlag_pattern_detects_fault(assign, fault_node_num, stuck_at)) {
+            solution = assign;
+            return true;
+        }
     }
     return false;
 }
 
 bool dlag_backtrack_search(const std::vector<int> &order,
-                                  int depth,
-                                  std::vector<int> &assign,
-                                  int fault_node_num,
-                                  int stuck_at,
-                                  std::vector<int> &solution) {
+                           int depth,
+                           std::vector<int> &assign,
+                           int fault_node_num,
+                           int stuck_at,
+                           std::vector<int> &solution) {
     if (++backtrack_count > MAX_BACKTRACKS) return false;
+    if (dlag_time_exceeded()) return false;
 
     DlagSimResult sim = dlag_simulate_pattern(assign, fault_node_num, stuck_at);
-    if (dlag_fault_already_blocked(sim, fault_node_num)) return false;
-    if (dlag_fault_detected_at_po(sim)) {
+
+    int fault_idx = dlag_node_index_by_num(fault_node_num);
+    bool activated = false;
+    if (fault_idx >= 0) {
+        int g = sim.good[fault_idx];
+        int f = sim.faulty[fault_idx];
+        if (g != LX && f != LX && g == f) return false;
+        activated = (g != LX && f != LX && g != f);
+    }
+
+    bool detected = false;
+    bool any_po_possible = false;
+    for (int i = 0; i < Npo; i++) {
+        int idx = Poutput[i]->indx;
+        int g = sim.good[idx];
+        int f = sim.faulty[idx];
+        if (g != LX && f != LX && g != f) {
+            detected = true;
+            break;
+        }
+        if (g == LX || f == LX) any_po_possible = true;
+    }
+
+    if (detected) {
         solution = assign;
         return true;
     }
-    if (!dlag_any_output_still_possible(sim)) return false;
-    if (depth >= (int)order.size()) return false;
+    if (!any_po_possible) return false;
+
+    if (depth >= (int)order.size() || depth >= MAX_SEARCH_DEPTH) return false;
 
     int pi_idx = order[depth];
     int first = 0, second = 1;
 
-    int cc0 = Pinput[pi_idx]->scoap.CC0;
-    int cc1 = Pinput[pi_idx]->scoap.CC1;
-    if (cc0 >= 0 && cc1 >= 0 && cc1 < cc0) {
-        first = 1;
-        second = 0;
+    if ((int)Pinput[pi_idx]->num == fault_node_num) {
+        first = 1 - stuck_at;
+        second = stuck_at;
+    } else {
+        int cc0 = Pinput[pi_idx]->scoap.CC0;
+        int cc1 = Pinput[pi_idx]->scoap.CC1;
+        if (cc0 >= 0 && cc1 >= 0 && cc1 < cc0) {
+            first = 1;
+            second = 0;
+        }
+
+        // Before activation, bias more strongly toward the easier value.
+        if (!activated && depth > MAX_SEARCH_DEPTH / 2) {
+            assign[pi_idx] = first;
+            if (dlag_backtrack_search(order, depth + 1, assign, fault_node_num, stuck_at, solution)) return true;
+            assign[pi_idx] = LX;
+            return false;
+        }
     }
 
     assign[pi_idx] = first;
@@ -261,8 +282,8 @@ bool dlag_backtrack_search(const std::vector<int> &order,
 }
 
 std::vector<int> dlag_compress_to_ternary(const std::vector<int> &binary_assign,
-                                                 int fault_node_num,
-                                                 int stuck_at) {
+                                          int fault_node_num,
+                                          int stuck_at) {
     std::vector<int> out = binary_assign;
     for (int i = 0; i < Npi; i++) {
         int oldv = out[i];
@@ -272,15 +293,13 @@ std::vector<int> dlag_compress_to_ternary(const std::vector<int> &binary_assign,
     return out;
 }
 
-
-static int cost_other_non_controlling (NSTRUC *np, int index) {
+static int cost_other_non_controlling(NSTRUC *np, int index) {
     int cost = 0;
     switch (np->type) {
         case NOT:
         case BRCH:
             break;
         case XOR:
-            // NOT IN NETLISTS
             break;
         case OR:
         case NOR:
@@ -382,7 +401,7 @@ void dlag_compute_scoap_internal() {
     done = false;
     int co_iters = 0;
     while (!done) {
-        if (++co_iters > Nnodes + 1) break;  // safety: avoid infinite loop on dangling nodes
+        if (++co_iters > Nnodes + 1) break;
         done = true;
         for (int i = 0; i < Nnodes; i++) {
             NSTRUC *np = &Node[i];
@@ -464,12 +483,17 @@ void dlag() {
 
     std::vector<int> order = dlag_build_relevant_pi_order(fault_num);
 
-    std::vector<int> assign(Npi, LX);
     std::vector<int> solution;
-    backtrack_count = 0;
-    bool ok = dlag_backtrack_search(order, 0, assign, fault_num, sa_val, solution);
+    dlag_search_start = clock();
 
-    if (!ok) {
+    // Fast guided-random attempt first.
+    if (!dlag_try_guided_random(order, fault_num, sa_val, solution)) {
+        std::vector<int> assign(Npi, LX);
+        backtrack_count = 0;
+        (void)dlag_backtrack_search(order, 0, assign, fault_num, sa_val, solution);
+    }
+
+    if (solution.empty()) {
         FILE *fd = fopen(outfile, "w");
         if (!fd) {
             printf("Cannot open output file!\n");
@@ -488,4 +512,3 @@ void dlag() {
 
     printf("==> OK");
 }
-
