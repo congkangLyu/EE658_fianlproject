@@ -8,6 +8,8 @@
 #include <vector>
 #include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
+#include <queue>
 #include <limits>
 #include <numeric>
 
@@ -103,7 +105,123 @@ bool dlag_has_possible_propagation(const std::vector<int> &assign, int fault_nod
 }
 
 static int backtrack_count;
-static const int MAX_BACKTRACKS = 100000;
+static const int MAX_BACKTRACKS = 5000;
+
+static void dlag_mark_fanout_cone(int start_idx, std::vector<char> &in_fanout_cone) {
+    if (start_idx < 0 || start_idx >= Nnodes) return;
+    std::queue<int> q;
+    q.push(start_idx);
+    in_fanout_cone[start_idx] = 1;
+    while (!q.empty()) {
+        int cur = q.front();
+        q.pop();
+        NSTRUC *np = &Node[cur];
+        for (unsigned i = 0; i < np->fout; i++) {
+            NSTRUC *dn = np->dnodes[i];
+            if (!dn) continue;
+            int nxt = dn->indx;
+            if (nxt < 0 || nxt >= Nnodes || in_fanout_cone[nxt]) continue;
+            in_fanout_cone[nxt] = 1;
+            q.push(nxt);
+        }
+    }
+}
+
+static void dlag_collect_support_pis(int node_idx,
+                                     const std::vector<char> &in_fanout_cone,
+                                     std::vector<char> &visited_back,
+                                     std::vector<char> &relevant_pi) {
+    if (node_idx < 0 || node_idx >= Nnodes) return;
+    if (visited_back[node_idx]) return;
+    visited_back[node_idx] = 1;
+
+    NSTRUC *np = &Node[node_idx];
+    if (np->ntype == PI) {
+        for (int i = 0; i < Npi; i++) {
+            if (Pinput[i]->indx == node_idx) {
+                relevant_pi[i] = 1;
+                break;
+            }
+        }
+        return;
+    }
+
+    for (unsigned i = 0; i < np->fin; i++) {
+        NSTRUC *up = np->unodes[i];
+        if (!up) continue;
+        int up_idx = up->indx;
+        if (up_idx < 0 || up_idx >= Nnodes) continue;
+        if (!in_fanout_cone[up_idx] && up->ntype != PI) continue;
+        dlag_collect_support_pis(up_idx, in_fanout_cone, visited_back, relevant_pi);
+    }
+}
+
+static std::vector<int> dlag_build_relevant_pi_order(int fault_node_num) {
+    std::vector<int> order;
+    int fault_idx = dlag_node_index_by_num(fault_node_num);
+    if (fault_idx < 0) return order;
+
+    std::vector<char> in_fanout_cone(Nnodes, 0);
+    dlag_mark_fanout_cone(fault_idx, in_fanout_cone);
+
+    std::vector<char> visited_back(Nnodes, 0);
+    std::vector<char> relevant_pi(Npi, 0);
+
+    for (int i = 0; i < Npo; i++) {
+        int po_idx = Poutput[i]->indx;
+        if (po_idx >= 0 && po_idx < Nnodes && in_fanout_cone[po_idx]) {
+            dlag_collect_support_pis(po_idx, in_fanout_cone, visited_back, relevant_pi);
+        }
+    }
+
+    for (int i = 0; i < Npi; i++) {
+        if (relevant_pi[i]) order.push_back(i);
+    }
+
+    if (order.empty()) {
+        for (int i = 0; i < Npi; i++) order.push_back(i);
+    }
+
+    std::sort(order.begin(), order.end(), [](int a, int b) {
+        NSTRUC *pa = Pinput[a];
+        NSTRUC *pb = Pinput[b];
+        int ca = std::min(pa->scoap.CC0, pa->scoap.CC1) + pa->scoap.CO;
+        int cb = std::min(pb->scoap.CC0, pb->scoap.CC1) + pb->scoap.CO;
+        if (ca != cb) return ca < cb;
+        return pa->num < pb->num;
+    });
+
+    return order;
+}
+
+static bool dlag_fault_already_blocked(const DlagSimResult &sim, int fault_node_num) {
+    int fault_idx = dlag_node_index_by_num(fault_node_num);
+    if (fault_idx < 0) return true;
+    int g = sim.good[fault_idx];
+    int f = sim.faulty[fault_idx];
+    return (g != LX && f != LX && g == f);
+}
+
+static bool dlag_any_output_still_possible(const DlagSimResult &sim) {
+    for (int i = 0; i < Npo; i++) {
+        int idx = Poutput[i]->indx;
+        int g = sim.good[idx];
+        int f = sim.faulty[idx];
+        if (g != LX && f != LX && g != f) return true;
+        if (g == LX || f == LX) return true;
+    }
+    return false;
+}
+
+static bool dlag_fault_detected_at_po(const DlagSimResult &sim) {
+    for (int i = 0; i < Npo; i++) {
+        int idx = Poutput[i]->indx;
+        int g = sim.good[idx];
+        int f = sim.faulty[idx];
+        if (g != LX && f != LX && g != f) return true;
+    }
+    return false;
+}
 
 bool dlag_backtrack_search(const std::vector<int> &order,
                                   int depth,
@@ -111,50 +229,25 @@ bool dlag_backtrack_search(const std::vector<int> &order,
                                   int fault_node_num,
                                   int stuck_at,
                                   std::vector<int> &solution) {
-    if (++backtrack_count > MAX_BACKTRACKS) return false;  // abort: search space too large
+    if (++backtrack_count > MAX_BACKTRACKS) return false;
 
-    // Single simulation for all three checks (was 3 separate simulations before)
     DlagSimResult sim = dlag_simulate_pattern(assign, fault_node_num, stuck_at);
-
-    // Check 1: can the fault still be activated?
-    int fault_idx = dlag_node_index_by_num(fault_node_num);
-    if (fault_idx >= 0) {
-        int g = sim.good[fault_idx];
-        int f = sim.faulty[fault_idx];
-        if (g != LX && f != LX && g == f) return false;  // fault cannot activate
-    }
-
-    // Check 2 & 3: propagation possible? already detected?
-    bool detected = false;
-    bool any_po_possible = false;
-    for (int i = 0; i < Npo; i++) {
-        int idx = Poutput[i]->indx;
-        int g = sim.good[idx];
-        int f = sim.faulty[idx];
-        if (g != LX && f != LX && g != f) { detected = true; break; }
-        if (g == LX || f == LX) any_po_possible = true;
-    }
-    if (detected) {
+    if (dlag_fault_already_blocked(sim, fault_node_num)) return false;
+    if (dlag_fault_detected_at_po(sim)) {
         solution = assign;
         return true;
     }
-    if (!any_po_possible) return false;  // no PO can show a difference
-
+    if (!dlag_any_output_still_possible(sim)) return false;
     if (depth >= (int)order.size()) return false;
 
     int pi_idx = order[depth];
     int first = 0, second = 1;
 
-    if ((int)Pinput[pi_idx]->num == fault_node_num) {
-        first = 1 - stuck_at;
-        second = stuck_at;
-    } else {
-        int cc0 = Pinput[pi_idx]->scoap.CC0;
-        int cc1 = Pinput[pi_idx]->scoap.CC1;
-        if (cc0 >= 0 && cc1 >= 0 && cc1 < cc0) {
-            first = 1;
-            second = 0;
-        }
+    int cc0 = Pinput[pi_idx]->scoap.CC0;
+    int cc1 = Pinput[pi_idx]->scoap.CC1;
+    if (cc0 >= 0 && cc1 >= 0 && cc1 < cc0) {
+        first = 1;
+        second = 0;
     }
 
     assign[pi_idx] = first;
@@ -369,16 +462,7 @@ void dlag() {
         dlag_compute_scoap_internal();
     }
 
-    std::vector<int> order(Npi);
-    for (int i = 0; i < Npi; i++) order[i] = i;
-    std::sort(order.begin(), order.end(), [](int a, int b) {
-        NSTRUC *pa = Pinput[a];
-        NSTRUC *pb = Pinput[b];
-        int ca = std::min(pa->scoap.CC0, pa->scoap.CC1) + pa->scoap.CO;
-        int cb = std::min(pb->scoap.CC0, pb->scoap.CC1) + pb->scoap.CO;
-        if (ca != cb) return ca < cb;
-        return pa->num < pb->num;
-    });
+    std::vector<int> order = dlag_build_relevant_pi_order(fault_num);
 
     std::vector<int> assign(Npi, LX);
     std::vector<int> solution;
