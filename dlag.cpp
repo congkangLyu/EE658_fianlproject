@@ -1,8 +1,8 @@
-
 #include "dlag.h"
 #include "globals.h"
 #include "utils.h"
 #include "static_helpers.h"
+
 #include <stdio.h>
 #include <cstdlib>
 #include <cstring>
@@ -10,35 +10,780 @@
 #include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
-#include <queue>
 #include <limits>
 #include <numeric>
-#include <ctime>
-#include <random>
+#include <functional>
+#include <deque>
 
-// Make these functions non-static so tpg.cpp can use them
+enum Val5 { VV0 = 0, VV1 = 1, VVX = 2, VVD = 3, VVDB = 4 };
+
+static inline int good_of(int v) {
+    if (v == VV0 || v == VVDB) return 0;
+    if (v == VV1 || v == VVD)  return 1;
+    return LX;
+}
+static inline int faulty_of(int v) {
+    if (v == VV0 || v == VVD)  return 0;
+    if (v == VV1 || v == VVDB) return 1;
+    return LX;
+}
+static inline int make5(int g, int f) {
+    if (g == LX || f == LX) return VVX;
+    if (g == 0 && f == 0) return VV0;
+    if (g == 1 && f == 1) return VV1;
+    if (g == 1 && f == 0) return VVD;
+    return VVDB;  // g=0, f=1
+}
+static inline bool is_error(int v)  { return v == VVD || v == VVDB; }
+static inline bool is_known(int v)  { return v != VVX; }
+static inline bool compatible(int a, int b) {
+    // Two 5-valued values are compatible if they agree on both good and faulty,
+    // allowing X to match anything on either side.
+    int ag = good_of(a), af = faulty_of(a);
+    int bg = good_of(b), bf = faulty_of(b);
+    if (ag != LX && bg != LX && ag != bg) return false;
+    if (af != LX && bf != LX && af != bf) return false;
+    return true;
+}
+static inline int merge5(int a, int b) {
+    // Intersect two compatible 5-valued values into the more specific one.
+    int g = good_of(a);   if (g == LX) g = good_of(b);
+    int f = faulty_of(a); if (f == LX) f = faulty_of(b);
+    return make5(g, f);
+}
+
+/*=====================================================================
+ *                        Gate type helpers
+ *===================================================================*/
+static inline int controlling_val(NSTRUC *np) {
+    switch (np->type) {
+        case AND: case NAND: return 0;
+        case OR:  case NOR:  return 1;
+        default: return -1;
+    }
+}
+static inline int noncontrolling_val(NSTRUC *np) {
+    int c = controlling_val(np);
+    return (c == 0) ? 1 : (c == 1 ? 0 : -1);
+}
+static inline bool output_inverts(NSTRUC *np) {
+    return (np->type == NAND || np->type == NOR || np->type == NOT);
+}
+
+/*=====================================================================
+ *                  5-valued gate evaluation (forward)
+ *===================================================================*/
+static int eval5_gate(NSTRUC *np, const std::vector<int> &val) {
+    auto gval = [&](int k){ return good_of(val[np->unodes[k]->indx]); };
+    auto fval = [&](int k){ return faulty_of(val[np->unodes[k]->indx]); };
+
+    auto eval_side = [&](const std::function<int(int)> &getv) -> int {
+        int fin = (int)np->fin;
+        switch (np->type) {
+            case BRCH: return (fin > 0) ? getv(0) : LX;
+            case NOT: { int v = getv(0); return (v == LX) ? LX : 1 - v; }
+            case AND: {
+                bool anyX = false;
+                for (int i = 0; i < fin; i++) {
+                    int v = getv(i);
+                    if (v == 0) return 0;
+                    if (v == LX) anyX = true;
+                }
+                return anyX ? LX : 1;
+            }
+            case NAND: {
+                bool anyX = false;
+                for (int i = 0; i < fin; i++) {
+                    int v = getv(i);
+                    if (v == 0) return 1;
+                    if (v == LX) anyX = true;
+                }
+                return anyX ? LX : 0;
+            }
+            case OR: {
+                bool anyX = false;
+                for (int i = 0; i < fin; i++) {
+                    int v = getv(i);
+                    if (v == 1) return 1;
+                    if (v == LX) anyX = true;
+                }
+                return anyX ? LX : 0;
+            }
+            case NOR: {
+                bool anyX = false;
+                for (int i = 0; i < fin; i++) {
+                    int v = getv(i);
+                    if (v == 1) return 0;
+                    if (v == LX) anyX = true;
+                }
+                return anyX ? LX : 1;
+            }
+            case XOR: {
+                int ones = 0;
+                for (int i = 0; i < fin; i++) {
+                    int v = getv(i);
+                    if (v == LX) return LX;
+                    ones += v;
+                }
+                return ones & 1;
+            }
+            default: return LX;
+        }
+    };
+
+    int gv = eval_side(gval);
+    int fv = eval_side(fval);
+    return make5(gv, fv);
+}
+
+/*=====================================================================
+ *                  Topology cache (built once per dlag() call)
+ *===================================================================*/
+struct TopoCache {
+    std::vector<std::vector<int>> by_level; // nodes grouped by level
+    std::vector<int> topo_order;            // ascending level order
+    int max_level = 0;
+    bool valid = false;
+};
+static TopoCache g_topo;
+
+static void build_topo_cache() {
+    g_topo.by_level.clear();
+    g_topo.topo_order.clear();
+    g_topo.max_level = 0;
+    for (int i = 0; i < Nnodes; i++)
+        if (Node[i].level > g_topo.max_level) g_topo.max_level = Node[i].level;
+    g_topo.by_level.assign(g_topo.max_level + 1, {});
+    for (int i = 0; i < Nnodes; i++)
+        g_topo.by_level[Node[i].level].push_back(i);
+    g_topo.topo_order.reserve(Nnodes);
+    for (int l = 0; l <= g_topo.max_level; l++)
+        for (int idx : g_topo.by_level[l]) g_topo.topo_order.push_back(idx);
+    g_topo.valid = true;
+}
+
 int dlag_node_index_by_num(int node_num) {
     auto it = idx_of_num.find(node_num);
     if (it == idx_of_num.end()) return -1;
     return it->second;
 }
 
-struct DlagSimResult {
-    std::vector<int> good;
-    std::vector<int> faulty;
-};
-
-static int backtrack_count;
-static const int MAX_BACKTRACKS = 5000;
-static const int MAX_SEARCH_DEPTH = 24;
-static const double MAX_SEARCH_SEC = 1.5;
-static clock_t dlag_search_start;
-
-static inline bool dlag_time_exceeded() {
-    return (double)(clock() - dlag_search_start) / CLOCKS_PER_SEC > MAX_SEARCH_SEC;
+/*=====================================================================
+ *           SCOAP computation (topological-order, single pass)
+ *===================================================================*/
+static int cost_other_non_controlling(NSTRUC *np, int index) {
+    int cost = 0;
+    switch (np->type) {
+        case NOT: case BRCH: break;
+        case XOR: break; // treat as 0 (not in ISCAS-85 netlists)
+        case OR: case NOR:
+            for (int i = 0; i < (int)np->fin; i++) {
+                if (i == index) continue;
+                cost += np->unodes[i]->scoap.CC0;
+            }
+            break;
+        case NAND: case AND:
+            for (int i = 0; i < (int)np->fin; i++) {
+                if (i == index) continue;
+                cost += np->unodes[i]->scoap.CC1;
+            }
+            break;
+        default: break;
+    }
+    return cost;
 }
 
-DlagSimResult dlag_simulate_pattern(const std::vector<int> &assign, int fault_node_num, int stuck_at) {
+void dlag_compute_scoap_internal() {
+    if (!g_topo.valid) build_topo_cache();
+    int big = std::numeric_limits<int>::max() / 4;
+
+    for (int i = 0; i < Nnodes; i++) {
+        Node[i].scoap.CC0 = -1;
+        Node[i].scoap.CC1 = -1;
+        Node[i].scoap.CO  = big;
+    }
+    for (int i = 0; i < Npi; i++) { Pinput[i]->scoap.CC0 = 1; Pinput[i]->scoap.CC1 = 1; }
+
+    // Forward pass (ascending level) - one iteration is enough.
+    for (int l = 0; l <= g_topo.max_level; l++) {
+        for (int idx : g_topo.by_level[l]) {
+            NSTRUC *np = &Node[idx];
+            if (np->ntype == PI) continue;
+            switch (np->type) {
+                case BRCH:
+                    np->scoap.CC0 = np->unodes[0]->scoap.CC0;
+                    np->scoap.CC1 = np->unodes[0]->scoap.CC1;
+                    break;
+                case NOT:
+                    np->scoap.CC0 = np->unodes[0]->scoap.CC1 + 1;
+                    np->scoap.CC1 = np->unodes[0]->scoap.CC0 + 1;
+                    break;
+                case OR: case NOR: case NAND: case AND: {
+                    std::vector<int> v0, v1;
+                    v0.reserve(np->fin); v1.reserve(np->fin);
+                    for (int j = 0; j < (int)np->fin; j++) {
+                        v0.push_back(np->unodes[j]->scoap.CC0);
+                        v1.push_back(np->unodes[j]->scoap.CC1);
+                    }
+                    if (np->type == OR) {
+                        np->scoap.CC0 = 1 + std::accumulate(v0.begin(), v0.end(), 0);
+                        np->scoap.CC1 = 1 + *std::min_element(v1.begin(), v1.end());
+                    } else if (np->type == NOR) {
+                        np->scoap.CC1 = 1 + std::accumulate(v0.begin(), v0.end(), 0);
+                        np->scoap.CC0 = 1 + *std::min_element(v1.begin(), v1.end());
+                    } else if (np->type == NAND) {
+                        np->scoap.CC1 = 1 + *std::min_element(v0.begin(), v0.end());
+                        np->scoap.CC0 = 1 + std::accumulate(v1.begin(), v1.end(), 0);
+                    } else {
+                        np->scoap.CC0 = 1 + *std::min_element(v0.begin(), v0.end());
+                        np->scoap.CC1 = 1 + std::accumulate(v1.begin(), v1.end(), 0);
+                    }
+                    break;
+                }
+                default: break;
+            }
+        }
+    }
+
+    for (int i = 0; i < Npo; i++) Poutput[i]->scoap.CO = 0;
+    // Backward pass (descending level) - one iteration converges.
+    for (int l = g_topo.max_level; l >= 0; l--) {
+        for (int idx : g_topo.by_level[l]) {
+            NSTRUC *np = &Node[idx];
+            if (np->scoap.CO >= big) continue;
+            for (int j = 0; j < (int)np->fin; j++) {
+                NSTRUC *in = np->unodes[j];
+                int contrib = np->scoap.CO + cost_other_non_controlling(np, j);
+                if (np->type != BRCH) contrib += 1;
+                if (contrib < in->scoap.CO) in->scoap.CO = contrib;
+            }
+        }
+    }
+}
+
+/*=====================================================================
+ *              D-Algorithm state, trail, and frontiers
+ *===================================================================*/
+struct TrailEntry {
+    enum Kind { VAL, DF_ADD, DF_DEL, JF_ADD, JF_DEL } kind;
+    int key;
+    int old_val;  // only for VAL
+};
+
+struct DalgState {
+    std::vector<int> val;                   // 5-valued, indexed by node idx
+    std::unordered_set<int> d_frontier;     // gate indices
+    std::unordered_set<int> j_frontier;     // gate (or branch) indices needing justification
+    std::vector<TrailEntry> trail;
+    int fault_idx = -1;
+    int stuck_at = 0;
+    std::vector<char> fault_cone;           // 1 if node is in fanout cone of fault
+};
+static DalgState g_st;
+
+static inline size_t checkpoint() { return g_st.trail.size(); }
+
+static void restore_to(size_t cp) {
+    while (g_st.trail.size() > cp) {
+        const TrailEntry &e = g_st.trail.back();
+        switch (e.kind) {
+            case TrailEntry::VAL:    g_st.val[e.key] = e.old_val; break;
+            case TrailEntry::DF_ADD: g_st.d_frontier.erase(e.key); break;
+            case TrailEntry::DF_DEL: g_st.d_frontier.insert(e.key); break;
+            case TrailEntry::JF_ADD: g_st.j_frontier.erase(e.key); break;
+            case TrailEntry::JF_DEL: g_st.j_frontier.insert(e.key); break;
+        }
+        g_st.trail.pop_back();
+    }
+}
+
+static inline void log_val(int idx, int old) {
+    g_st.trail.push_back({TrailEntry::VAL, idx, old});
+}
+static inline void df_add(int idx) {
+    if (g_st.d_frontier.insert(idx).second)
+        g_st.trail.push_back({TrailEntry::DF_ADD, idx, 0});
+}
+static inline void df_del(int idx) {
+    if (g_st.d_frontier.erase(idx))
+        g_st.trail.push_back({TrailEntry::DF_DEL, idx, 0});
+}
+static inline void jf_add(int idx) {
+    if (g_st.j_frontier.insert(idx).second)
+        g_st.trail.push_back({TrailEntry::JF_ADD, idx, 0});
+}
+static inline void jf_del(int idx) {
+    if (g_st.j_frontier.erase(idx))
+        g_st.trail.push_back({TrailEntry::JF_DEL, idx, 0});
+}
+
+/* A gate g is on the D-frontier iff:
+ *   - val[g] == VVX
+ *   - at least one input has an error value (D or D')
+ */
+static bool is_d_frontier_gate(NSTRUC *np) {
+    if (np->ntype == PI) return false;
+    if (g_st.val[np->indx] != VVX) return false;
+    for (int k = 0; k < (int)np->fin; k++) {
+        if (is_error(g_st.val[np->unodes[k]->indx])) return true;
+    }
+    return false;
+}
+
+/* A line (gate output) is on the J-frontier iff:
+ *   - val[l] is known (0 or 1) and not yet consistent with its gate output
+ *     computed from its inputs (i.e., needs at least one more input decision)
+ * For PIs: never in J-frontier. */
+static bool is_j_frontier_gate(NSTRUC *np) {
+    if (np->ntype == PI) return false;
+    int v = g_st.val[np->indx];
+    if (!is_known(v)) return false;
+    int ev = eval5_gate(np, g_st.val);
+    if ((int)np->indx == g_st.fault_idx) {
+        // At the fault site, the faulty side is pinned by stuck-at;
+        // only the good side has to be justified from the inputs.
+        int need = good_of(v);
+        int got  = good_of(ev);
+        return got != need;
+    }
+    if (ev == v) return false;
+    return true;
+}
+
+static void refresh_gate_frontiers(int gidx) {
+    NSTRUC *np = &Node[gidx];
+    if (is_d_frontier_gate(np)) df_add(gidx); else df_del(gidx);
+    if (is_j_frontier_gate(np)) jf_add(gidx); else jf_del(gidx);
+}
+
+/*=====================================================================
+ *              Forward implication with queue
+ *===================================================================*/
+// Attempt to set val[idx] = newv; returns false on conflict.
+static bool assign_and_imply(int start_idx, int newv, std::deque<int> &queue);
+
+// Evaluate forward from an imply queue. Returns false on any conflict.
+static bool imply_forward(std::deque<int> &queue) {
+    while (!queue.empty()) {
+        int idx = queue.front(); queue.pop_front();
+        NSTRUC *np = &Node[idx];
+        // Re-evaluate every fanout gate of np.
+        for (int k = 0; k < (int)np->fout; k++) {
+            NSTRUC *g = np->dnodes[k];
+            int gidx = g->indx;
+            int newv = eval5_gate(g, g_st.val);
+            int cur  = g_st.val[gidx];
+
+            // Fault-site pinning: its value is fixed as VVD or VVDB by the
+            // initial injection. The faulty side is *forced* by stuck-at,
+            // so imply_forward must only check good-side consistency and
+            // must never overwrite the pinned 5-valued value.
+            if (gidx == g_st.fault_idx) {
+                int got_g  = good_of(newv);
+                int want_g = good_of(cur);
+                if (got_g != LX && want_g != LX && got_g != want_g) return false;
+                refresh_gate_frontiers(gidx);
+                continue;
+            }
+
+            if (cur == VVX) {
+                if (newv != VVX) {
+                    // Fill in new value
+                    log_val(gidx, cur);
+                    g_st.val[gidx] = newv;
+                    queue.push_back(gidx);
+                }
+            } else {
+                // cur is known/D/D'. The newly computed newv must be compatible.
+                if (newv != VVX && !compatible(cur, newv)) return false;
+                // If newv is more specific (compatible) than cur, tighten.
+                int merged = (newv == VVX) ? cur : merge5(cur, newv);
+                if (merged != cur) {
+                    log_val(gidx, cur);
+                    g_st.val[gidx] = merged;
+                    queue.push_back(gidx);
+                }
+            }
+            refresh_gate_frontiers(gidx);
+        }
+    }
+    return true;
+}
+
+static bool assign_and_imply(int start_idx, int newv, std::deque<int> &queue) {
+    int cur = g_st.val[start_idx];
+    if (cur == newv) return true;
+    if (cur != VVX) {
+        if (!compatible(cur, newv)) return false;
+        newv = merge5(cur, newv);
+        if (newv == cur) return true;
+    }
+    log_val(start_idx, cur);
+    g_st.val[start_idx] = newv;
+    refresh_gate_frontiers(start_idx);
+    queue.push_back(start_idx);
+    return imply_forward(queue);
+}
+
+static bool assign_and_imply(int start_idx, int newv) {
+    std::deque<int> q;
+    return assign_and_imply(start_idx, newv, q);
+}
+
+/*=====================================================================
+ *              X-path pruning (from any D-frontier to some PO)
+ *===================================================================*/
+static bool xpath_to_po_exists() {
+    // Any D already at a PO?
+    for (int i = 0; i < Npo; i++) {
+        if (is_error(g_st.val[Poutput[i]->indx])) return true;
+    }
+    if (g_st.d_frontier.empty()) return false;
+
+    // BFS from each D-frontier gate through X/D nodes.
+    std::vector<char> vis(Nnodes, 0);
+    std::deque<int> q;
+    for (int gidx : g_st.d_frontier) { q.push_back(gidx); vis[gidx] = 1; }
+
+    while (!q.empty()) {
+        int idx = q.front(); q.pop_front();
+        NSTRUC *np = &Node[idx];
+        // A PO on the frontier counts as reachable.
+        if (np->ntype == PO) return true;
+        // Some circuits flag POs via Poutput only; double-check below.
+        for (int k = 0; k < (int)np->fout; k++) {
+            NSTRUC *g = np->dnodes[k];
+            int gi = g->indx;
+            if (vis[gi]) continue;
+            int v = g_st.val[gi];
+            if (v == VVX || is_error(v)) {
+                vis[gi] = 1;
+                q.push_back(gi);
+            }
+        }
+    }
+    // Fallback: any Poutput visited?
+    for (int i = 0; i < Npo; i++) if (vis[Poutput[i]->indx]) return true;
+    return false;
+}
+
+/*=====================================================================
+ *              Phase 4 selection strategies
+ *===================================================================*/
+struct DalgOptions {
+    enum DFSel { DF_DEFAULT, DF_NL, DF_NH, DF_LH, DF_CC } df_sel = DF_DEFAULT;
+    enum JFSel { JF_DEFAULT, JF_V0 } jf_sel = JF_DEFAULT;
+    int  backtrack_limit = 100000;   // safety cap (XOR-heavy circuits like c1355/c499
+                                     // are a known weakness of D-algorithm; on those
+                                     // this returns false and the caller can fall back
+                                     // to PODEM)
+};
+static DalgOptions g_opts;
+
+static int select_d_frontier_gate() {
+    if (g_st.d_frontier.empty()) return -1;
+    int best = -1;
+    for (int gidx : g_st.d_frontier) {
+        if (best < 0) { best = gidx; continue; }
+        NSTRUC *a = &Node[gidx];
+        NSTRUC *b = &Node[best];
+        bool pick = false;
+        switch (g_opts.df_sel) {
+            case DalgOptions::DF_NL: pick = (a->num < b->num); break;
+            case DalgOptions::DF_NH: pick = (a->num > b->num); break;
+            case DalgOptions::DF_LH: pick = (a->level > b->level); break;
+            case DalgOptions::DF_CC: pick = (a->scoap.CO < b->scoap.CO); break;
+            case DalgOptions::DF_DEFAULT:
+            default:                 pick = (a->level > b->level); break; // sensible default
+        }
+        if (pick) best = gidx;
+    }
+    return best;
+}
+
+// Choose which input of a J-frontier gate to assign next, and what value.
+// Returns index (0..fin-1) of the input to branch on. The caller tries
+// the two values: controlling-value to "break" the gate, then non-controlling.
+static int select_j_input(NSTRUC *np) {
+    // Scan X-valued inputs and pick by strategy.
+    int best = -1;
+    for (int k = 0; k < (int)np->fin; k++) {
+        if (g_st.val[np->unodes[k]->indx] != VVX) continue;
+        if (best < 0) { best = k; continue; }
+        NSTRUC *a = np->unodes[k];
+        NSTRUC *b = np->unodes[best];
+        bool pick = false;
+        switch (g_opts.jf_sel) {
+            case DalgOptions::JF_V0: {
+                int ca = std::min(a->scoap.CC0, a->scoap.CC1);
+                int cb = std::min(b->scoap.CC0, b->scoap.CC1);
+                pick = (ca < cb);
+                break;
+            }
+            default: pick = false; // first encountered wins
+        }
+        if (pick) best = k;
+    }
+    return best;
+}
+
+/*=====================================================================
+ *              Error-at-PO test
+ *===================================================================*/
+static bool error_at_any_po() {
+    for (int i = 0; i < Npo; i++)
+        if (is_error(g_st.val[Poutput[i]->indx])) return true;
+    return false;
+}
+
+/*=====================================================================
+ *              Recursive D-Algorithm core
+ *===================================================================*/
+static long g_bt_count = 0;
+
+static bool dalg_recursive();
+
+// Try to justify a single J-frontier line `np` with required known value v.
+// For AND/OR style gates with controlling/non-controlling semantics we pick
+// one input at a time. For NOT/BRCH the value is propagated mechanically.
+static bool justify_gate(NSTRUC *np) {
+    int required = g_st.val[np->indx];
+    if (!is_known(required)) return true;
+
+    // Simple cases first.
+    int req_good0 = good_of(required);
+    if (np->type == BRCH) {
+        // Branch: stem must carry the same good value.
+        int want = (req_good0 == LX) ? VVX : (req_good0 == 0 ? VV0 : VV1);
+        return assign_and_imply(np->unodes[0]->indx, want) && dalg_recursive();
+    }
+    if (np->type == NOT) {
+        if (req_good0 == LX) return dalg_recursive();
+        int need = (req_good0 == 0) ? VV1 : VV0;
+        return assign_and_imply(np->unodes[0]->indx, need) && dalg_recursive();
+    }
+    if (np->type == XOR) {
+        // Not used in ISCAS-85; fall back to forcing any X-input to 0 and recurse.
+        int k = select_j_input(np);
+        if (k < 0) return true; // already justified by implication
+        size_t cp = checkpoint();
+        if (assign_and_imply(np->unodes[k]->indx, 0) && dalg_recursive()) return true;
+        restore_to(cp);
+        cp = checkpoint();
+        if (assign_and_imply(np->unodes[k]->indx, 1) && dalg_recursive()) return true;
+        restore_to(cp);
+        return false;
+    }
+
+    // AND/NAND/OR/NOR.
+    int ctrl    = controlling_val(np);
+    int nonctrl = noncontrolling_val(np);
+    bool out_inv = output_inverts(np);
+    // Justify the good side only. At fault sites the faulty side is pinned
+    // by stuck-at; outside the fault cone good == faulty anyway.
+    int req_good = good_of(required);
+    if (req_good == LX) return dalg_recursive();
+    int eff_req = out_inv ? (1 - req_good) : req_good;
+
+    if (eff_req == nonctrl) {
+        // All X-inputs must be non-controlling: force them (no decision).
+        for (int k = 0; k < (int)np->fin; k++) {
+            int v = g_st.val[np->unodes[k]->indx];
+            if (v == VVX) {
+                if (!assign_and_imply(np->unodes[k]->indx, nonctrl)) return false;
+            } else if (v != VVX && good_of(v) != nonctrl && good_of(v) != LX) {
+                return false; // conflict: should have been caught earlier
+            }
+        }
+        return dalg_recursive();
+    }
+
+    // eff_req == ctrl: at least one input must be controlling.
+    int k = select_j_input(np);
+    if (k < 0) {
+        // No X-input: the gate must already be consistent.
+        return dalg_recursive();
+    }
+    size_t cp = checkpoint();
+    // Try controlling value on the selected input.
+    if (assign_and_imply(np->unodes[k]->indx, ctrl) && dalg_recursive()) return true;
+    restore_to(cp);
+    // Try non-controlling on that input (other inputs will need to carry it).
+    cp = checkpoint();
+    if (assign_and_imply(np->unodes[k]->indx, nonctrl) && dalg_recursive()) return true;
+    restore_to(cp);
+    return false;
+}
+
+// Rank D-frontier gates according to the active strategy. Returns a sorted
+// list (best first) so that the recursion can try alternatives on failure.
+static std::vector<int> ranked_d_frontier() {
+    std::vector<int> cands(g_st.d_frontier.begin(), g_st.d_frontier.end());
+    auto key = [](int gidx) -> long long {
+        NSTRUC *np = &Node[gidx];
+        switch (g_opts.df_sel) {
+            case DalgOptions::DF_NL: return (long long) np->num;
+            case DalgOptions::DF_NH: return -(long long) np->num;
+            case DalgOptions::DF_LH: return -(long long) np->level;
+            case DalgOptions::DF_CC: return (long long) np->scoap.CO;
+            default:                 return -(long long) np->level;
+        }
+    };
+    std::stable_sort(cands.begin(), cands.end(),
+                     [&](int a, int b){ return key(a) < key(b); });
+    return cands;
+}
+
+// Try each D-frontier gate in rank order. For a chosen gate, assign all X
+// inputs to its non-controlling value and recurse.
+static bool propagate_d_frontier() {
+    std::vector<int> cands = ranked_d_frontier();
+    for (int gidx : cands) {
+        NSTRUC *np = &Node[gidx];
+        int nonctrl = noncontrolling_val(np);
+
+        size_t cp = checkpoint();
+        bool ok = true;
+
+        if (nonctrl < 0) {
+            // NOT / BRCH: error propagates mechanically via imply_forward.
+            // XOR: try one X-input with 0 then 1.
+            if (np->type == XOR) {
+                int k = -1;
+                for (int i = 0; i < (int)np->fin; i++)
+                    if (g_st.val[np->unodes[i]->indx] == VVX) { k = i; break; }
+                if (k >= 0) {
+                    size_t cp2 = checkpoint();
+                    if (assign_and_imply(np->unodes[k]->indx, 0) &&
+                        dalg_recursive()) return true;
+                    restore_to(cp2);
+                    cp2 = checkpoint();
+                    if (assign_and_imply(np->unodes[k]->indx, 1) &&
+                        dalg_recursive()) return true;
+                    restore_to(cp2);
+                    continue; // try next D-frontier gate
+                }
+            }
+            // NOT/BRCH or XOR with no X-inputs: just recurse.
+            if (dalg_recursive()) return true;
+            restore_to(cp);
+            continue;
+        }
+
+        for (int k = 0; k < (int)np->fin; k++) {
+            int v = g_st.val[np->unodes[k]->indx];
+            if (v == VVX) {
+                if (!assign_and_imply(np->unodes[k]->indx, nonctrl)) {
+                    ok = false; break;
+                }
+            }
+        }
+        if (ok && dalg_recursive()) return true;
+        restore_to(cp);
+    }
+    return false;
+}
+
+static bool dalg_recursive() {
+    if (++g_bt_count > g_opts.backtrack_limit) return false;
+
+    // (1) Pruning: X-path must still exist unless error already at PO.
+    if (!error_at_any_po() && !xpath_to_po_exists()) return false;
+
+    // (2) Success: error at PO and J-frontier empty.
+    if (error_at_any_po() && g_st.j_frontier.empty()) return true;
+
+    // (3) Otherwise: pick next action.
+    //     Prefer D-frontier propagation if the error has not reached a PO yet.
+    if (!error_at_any_po()) {
+        return propagate_d_frontier();
+    }
+
+    // Error reached a PO but some J-frontier lines still unjustified.
+    // Pick one (SCOAP-guided) and try to justify it.
+    int best = -1; int best_score = std::numeric_limits<int>::max();
+    for (int jidx : g_st.j_frontier) {
+        NSTRUC *np = &Node[jidx];
+        int score = std::min(np->scoap.CC0, np->scoap.CC1);
+        if (score < best_score) { best_score = score; best = jidx; }
+    }
+    if (best < 0) return true; // shouldn't happen: j_frontier empty handled above
+    return justify_gate(&Node[best]);
+}
+
+/*=====================================================================
+ *              Fault injection and top-level entry
+ *===================================================================*/
+static void build_fault_cone(int fault_idx) {
+    g_st.fault_cone.assign(Nnodes, 0);
+    std::deque<int> q;
+    q.push_back(fault_idx); g_st.fault_cone[fault_idx] = 1;
+    while (!q.empty()) {
+        int i = q.front(); q.pop_front();
+        NSTRUC *np = &Node[i];
+        for (int k = 0; k < (int)np->fout; k++) {
+            int c = np->dnodes[k]->indx;
+            if (!g_st.fault_cone[c]) { g_st.fault_cone[c] = 1; q.push_back(c); }
+        }
+    }
+}
+
+// Returns true on success and writes the binary PI assignment to pi_out
+// (size Npi), unassigned PIs remain as LX.
+static bool dalg_generate_test(int fault_num, int stuck_at, std::vector<int> &pi_out) {
+    pi_out.assign(Npi, LX);
+
+    int fault_idx = dlag_node_index_by_num(fault_num);
+    if (fault_idx < 0) return false;
+
+    // Initialize state
+    g_st.val.assign(Nnodes, VVX);
+    g_st.d_frontier.clear();
+    g_st.j_frontier.clear();
+    g_st.trail.clear();
+    g_st.fault_idx = fault_idx;
+    g_st.stuck_at = stuck_at;
+    build_fault_cone(fault_idx);
+    g_bt_count = 0;
+
+    // Inject the error: set val[fault] = D or D'.
+    NSTRUC *fn = &Node[fault_idx];
+    int err = (stuck_at == 0) ? VVD : VVDB;  // SA0 => good=1, faulty=0 => D
+    {
+        // We place the error directly; fault line still needs justification
+        // of its GOOD value by its drivers (unless it's a PI).
+        g_st.val[fault_idx] = err;
+        g_st.trail.push_back({TrailEntry::VAL, fault_idx, VVX});
+        // Propagate D forward through all fanouts via imply.
+        std::deque<int> q;
+        q.push_back(fault_idx);
+        if (!imply_forward(q)) return false;
+        // Fault site itself enters J-frontier unless it is a PI.
+        if (fn->ntype != PI) jf_add(fault_idx);
+        refresh_gate_frontiers(fault_idx);
+    }
+
+    // Run the recursive D-algorithm.
+    bool r = dalg_recursive();
+    if (!r) return false;
+
+    // Read off PI assignments. For each PI, the good value (if known) goes out.
+    for (int i = 0; i < Npi; i++) {
+        int v = g_st.val[Pinput[i]->indx];
+        int g = good_of(v);
+        pi_out[i] = (g == LX) ? LX : g;
+    }
+    return true;
+}
+
+/*=====================================================================
+ *              Legacy 3-valued simulation helpers (for tpg.cpp)
+ *===================================================================*/
+struct DlagSimResult { std::vector<int> good; std::vector<int> faulty; };
+
+DlagSimResult dlag_simulate_pattern(const std::vector<int> &assign,
+                                    int fault_node_num, int stuck_at) {
+    if (!g_topo.valid) build_topo_cache();
     DlagSimResult res;
     res.good.assign(Nnodes, LX);
     res.faulty.assign(Nnodes, LX);
@@ -46,397 +791,116 @@ DlagSimResult dlag_simulate_pattern(const std::vector<int> &assign, int fault_no
     for (int i = 0; i < Npi; i++) {
         int v = (i < (int)assign.size()) ? assign[i] : LX;
         int idx = Pinput[i]->indx;
-        res.good[idx] = v;
+        res.good[idx]   = v;
         res.faulty[idx] = ((int)Pinput[i]->num == fault_node_num) ? stuck_at : v;
     }
 
-    int max_level = 0;
-    for (int i = 0; i < Nnodes; i++) {
-        if (Node[i].level > max_level) max_level = Node[i].level;
-    }
-
-    for (int l = 0; l <= max_level; l++) {
-        for (int i = 0; i < Nnodes; i++) {
-            NSTRUC *np = &Node[i];
-            if (np->level != l) continue;
+    for (int l = 0; l <= g_topo.max_level; l++) {
+        for (int idx : g_topo.by_level[l]) {
+            NSTRUC *np = &Node[idx];
             if (np->ntype == PI) continue;
-
-            std::vector<int> gins, fins;
-            gins.reserve(np->fin);
-            fins.reserve(np->fin);
-            for (unsigned k = 0; k < np->fin; k++) {
-                gins.push_back(res.good[np->unodes[k]->indx]);
-                fins.push_back(res.faulty[np->unodes[k]->indx]);
+            int gv, fv;
+            if (np->type == BRCH) {
+                gv = res.good[np->unodes[0]->indx];
+                fv = res.faulty[np->unodes[0]->indx];
+            } else {
+                gv = eval_gate_from_inputs(np, res.good);
+                fv = eval_gate_from_inputs(np, res.faulty);
             }
-
-            int gv = eval_gate_from_inputs(np, res.good);
-            int fv = eval_gate_from_inputs(np, res.faulty);
-            if (np->ntype == FB) {
-                gv = gins.empty() ? LX : gins[0];
-                fv = fins.empty() ? LX : fins[0];
-            }
-
-            res.good[np->indx] = gv;
-            res.faulty[np->indx] = ((int)np->num == fault_node_num) ? stuck_at : fv;
+            res.good[idx] = gv;
+            res.faulty[idx] = ((int)np->num == fault_node_num) ? stuck_at : fv;
         }
     }
-
     return res;
 }
 
-bool dlag_pattern_detects_fault(const std::vector<int> &assign, int fault_node_num, int stuck_at) {
-    DlagSimResult sim = dlag_simulate_pattern(assign, fault_node_num, stuck_at);
+bool dlag_pattern_detects_fault(const std::vector<int> &assign,
+                                int fault_node_num, int stuck_at) {
+    DlagSimResult s = dlag_simulate_pattern(assign, fault_node_num, stuck_at);
     for (int i = 0; i < Npo; i++) {
         int idx = Poutput[i]->indx;
-        int g = sim.good[idx];
-        int f = sim.faulty[idx];
+        int g = s.good[idx], f = s.faulty[idx];
         if (g != LX && f != LX && g != f) return true;
     }
     return false;
 }
 
-static std::vector<int> dlag_build_relevant_pi_order(int fault_node_num) {
-    std::vector<int> order;
-    int fault_idx = dlag_node_index_by_num(fault_node_num);
-    if (fault_idx < 0) {
-        for (int i = 0; i < Npi; i++) order.push_back(i);
-        return order;
-    }
-
-    // 1) forward cone from fault to find reachable PO region
-    std::vector<char> reach_from_fault(Nnodes, 0);
-    std::queue<int> q;
-    q.push(fault_idx);
-    reach_from_fault[fault_idx] = 1;
-    while (!q.empty()) {
-        int u = q.front();
-        q.pop();
-        NSTRUC *np = &Node[u];
-        for (unsigned k = 0; k < np->fout; k++) {
-            int v = np->dnodes[k]->indx;
-            if (!reach_from_fault[v]) {
-                reach_from_fault[v] = 1;
-                q.push(v);
-            }
-        }
-    }
-
-    // 2) backward from reachable POs to collect all PI ancestors that can matter
-    std::vector<char> needed(Nnodes, 0);
-    std::queue<int> qb;
+// Kept for tpg.cpp compatibility. Not used by the new search.
+bool dlag_can_still_activate(const std::vector<int> &assign,
+                             int fault_node_num, int stuck_at) {
+    int fi = dlag_node_index_by_num(fault_node_num);
+    if (fi < 0) return false;
+    DlagSimResult s = dlag_simulate_pattern(assign, fault_node_num, stuck_at);
+    int g = s.good[fi], f = s.faulty[fi];
+    if (g != LX && f != LX && g != f) return true;
+    return (g == LX || f == LX);
+}
+bool dlag_has_possible_propagation(const std::vector<int> &assign,
+                                   int fault_node_num, int stuck_at) {
+    DlagSimResult s = dlag_simulate_pattern(assign, fault_node_num, stuck_at);
     for (int i = 0; i < Npo; i++) {
         int idx = Poutput[i]->indx;
-        if (reach_from_fault[idx]) {
-            needed[idx] = 1;
-            qb.push(idx);
-        }
+        int g = s.good[idx], f = s.faulty[idx];
+        if (g != LX && f != LX && g != f) return true;
+        if (g == LX || f == LX) return true;
     }
+    return false;
+}
 
-    std::unordered_set<int> pi_set;
-    while (!qb.empty()) {
-        int u = qb.front();
-        qb.pop();
-        NSTRUC *np = &Node[u];
-        if (np->ntype == PI) {
-            pi_set.insert(u);
-            continue;
-        }
-        for (unsigned k = 0; k < np->fin; k++) {
-            int p = np->unodes[k]->indx;
-            if (!needed[p]) {
-                needed[p] = 1;
-                qb.push(p);
-            }
-        }
-    }
-
-    for (int i = 0; i < Npi; i++) {
-        if (pi_set.count(Pinput[i]->indx)) order.push_back(i);
-    }
-    if (order.empty()) {
-        for (int i = 0; i < Npi; i++) order.push_back(i);
-    }
-
-    std::sort(order.begin(), order.end(), [](int a, int b) {
-        NSTRUC *pa = Pinput[a];
-        NSTRUC *pb = Pinput[b];
+/*=====================================================================
+ *              Ternary compression (keeps old Phase 3 behavior)
+ *===================================================================*/
+std::vector<int> dlag_compress_to_ternary(const std::vector<int> &binary_assign,
+                                          int fault_node_num, int stuck_at) {
+    std::vector<int> out = binary_assign;
+    // Drop the "most expensive" PIs first for a better ternary result.
+    std::vector<int> order(Npi);
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [](int a, int b){
+        NSTRUC *pa = Pinput[a]; NSTRUC *pb = Pinput[b];
         int ca = std::min(pa->scoap.CC0, pa->scoap.CC1) + pa->scoap.CO;
         int cb = std::min(pb->scoap.CC0, pb->scoap.CC1) + pb->scoap.CO;
-        if (ca != cb) return ca < cb;
-        return pa->num < pb->num;
+        return ca > cb;
     });
-    return order;
-}
-
-static bool dlag_try_guided_random(const std::vector<int> &order,
-                                   int fault_node_num,
-                                   int stuck_at,
-                                   std::vector<int> &solution) {
-    std::mt19937 rng((unsigned)time(nullptr));
-    std::uniform_int_distribution<int> bit(0, 1);
-
-    const int trials = 256;
-    std::vector<int> assign(Npi, LX);
-
-    for (int t = 0; t < trials; t++) {
-        if (dlag_time_exceeded()) return false;
-        std::fill(assign.begin(), assign.end(), LX);
-
-        for (int pos = 0; pos < (int)order.size() && pos < MAX_SEARCH_DEPTH; pos++) {
-            int pi_idx = order[pos];
-            int v = bit(rng);
-
-            if ((int)Pinput[pi_idx]->num == fault_node_num) {
-                v = 1 - stuck_at;
-            } else {
-                int cc0 = Pinput[pi_idx]->scoap.CC0;
-                int cc1 = Pinput[pi_idx]->scoap.CC1;
-                int preferred = (cc1 >= 0 && cc0 >= 0 && cc1 < cc0) ? 1 : 0;
-
-                // Mostly choose the preferred easy value, but allow randomness.
-                if ((t & 3) != 0) v = preferred;
-            }
-            assign[pi_idx] = v;
-        }
-
-        if (dlag_pattern_detects_fault(assign, fault_node_num, stuck_at)) {
-            solution = assign;
-            return true;
-        }
-    }
-    return false;
-}
-
-bool dlag_backtrack_search(const std::vector<int> &order,
-                           int depth,
-                           std::vector<int> &assign,
-                           int fault_node_num,
-                           int stuck_at,
-                           std::vector<int> &solution) {
-    if (++backtrack_count > MAX_BACKTRACKS) return false;
-    if (dlag_time_exceeded()) return false;
-
-    DlagSimResult sim = dlag_simulate_pattern(assign, fault_node_num, stuck_at);
-
-    int fault_idx = dlag_node_index_by_num(fault_node_num);
-    bool activated = false;
-    if (fault_idx >= 0) {
-        int g = sim.good[fault_idx];
-        int f = sim.faulty[fault_idx];
-        if (g != LX && f != LX && g == f) return false;
-        activated = (g != LX && f != LX && g != f);
-    }
-
-    bool detected = false;
-    bool any_po_possible = false;
-    for (int i = 0; i < Npo; i++) {
-        int idx = Poutput[i]->indx;
-        int g = sim.good[idx];
-        int f = sim.faulty[idx];
-        if (g != LX && f != LX && g != f) {
-            detected = true;
-            break;
-        }
-        if (g == LX || f == LX) any_po_possible = true;
-    }
-
-    if (detected) {
-        solution = assign;
-        return true;
-    }
-    if (!any_po_possible) return false;
-
-    if (depth >= (int)order.size() || depth >= MAX_SEARCH_DEPTH) return false;
-
-    int pi_idx = order[depth];
-    int first = 0, second = 1;
-
-    if ((int)Pinput[pi_idx]->num == fault_node_num) {
-        first = 1 - stuck_at;
-        second = stuck_at;
-    } else {
-        int cc0 = Pinput[pi_idx]->scoap.CC0;
-        int cc1 = Pinput[pi_idx]->scoap.CC1;
-        if (cc0 >= 0 && cc1 >= 0 && cc1 < cc0) {
-            first = 1;
-            second = 0;
-        }
-
-        // Before activation, bias more strongly toward the easier value.
-        if (!activated && depth > MAX_SEARCH_DEPTH / 2) {
-            assign[pi_idx] = first;
-            if (dlag_backtrack_search(order, depth + 1, assign, fault_node_num, stuck_at, solution)) return true;
-            assign[pi_idx] = LX;
-            return false;
-        }
-    }
-
-    assign[pi_idx] = first;
-    if (dlag_backtrack_search(order, depth + 1, assign, fault_node_num, stuck_at, solution)) return true;
-
-    assign[pi_idx] = second;
-    if (dlag_backtrack_search(order, depth + 1, assign, fault_node_num, stuck_at, solution)) return true;
-
-    assign[pi_idx] = LX;
-    return false;
-}
-
-std::vector<int> dlag_compress_to_ternary(const std::vector<int> &binary_assign,
-                                          int fault_node_num,
-                                          int stuck_at) {
-    std::vector<int> out = binary_assign;
-    for (int i = 0; i < Npi; i++) {
+    for (int i : order) {
         int oldv = out[i];
+        if (oldv == LX) continue;
         out[i] = LX;
         if (!dlag_pattern_detects_fault(out, fault_node_num, stuck_at)) out[i] = oldv;
     }
     return out;
 }
 
-static int cost_other_non_controlling(NSTRUC *np, int index) {
-    int cost = 0;
-    switch (np->type) {
-        case NOT:
-        case BRCH:
-            break;
-        case XOR:
-            break;
-        case OR:
-        case NOR:
-            for (int i = 0; i < np->fin; i++) {
-                if (i == index) continue;
-                cost += np->unodes[i]->scoap.CC0;
-            }
-            break;
-        case NAND:
-        case AND:
-            for (int i = 0; i < np->fin; i++) {
-                if (i == index) continue;
-                cost += np->unodes[i]->scoap.CC1;
-            }
-            break;
-        default:
-            printf("Unknown node type!\n");
-            exit(-1);
-    }
-    return cost;
+/*=====================================================================
+ *              Legacy wrapper: dlag_backtrack_search
+ *              (called by tpg.cpp). Delegates to the new D-algorithm.
+ *===================================================================*/
+bool dlag_backtrack_search(const std::vector<int> & /*order*/,
+                           int /*depth*/,
+                           std::vector<int> &assign,
+                           int fault_node_num,
+                           int stuck_at,
+                           std::vector<int> &solution) {
+    if (!dalg_generate_test(fault_node_num, stuck_at, assign)) return false;
+    solution = assign;
+    return true;
 }
 
-void dlag_compute_scoap_internal() {
-    int big_number = std::numeric_limits<int>::max() / 4;
-    for (int i = 0; i < Nnodes; i++) {
-        Node[i].scoap.CC0 = -1;
-        Node[i].scoap.CC1 = -1;
-        Node[i].scoap.CO = big_number;
-    }
-    for (int i = 0; i < Npi; i++) {
-        Pinput[i]->scoap.CC0 = 1;
-        Pinput[i]->scoap.CC1 = 1;
-    }
-    for (int i = 0; i < Npo; i++) {
-        Poutput[i]->scoap.CO = 0;
-    }
-
-    bool done = false;
-    while (!done) {
-        done = true;
-        for (int i = 0; i < Nnodes; i++) {
-            NSTRUC *np = &Node[i];
-            if (np->ntype == PI) continue;
-
-            std::vector<int> v0, v1;
-            switch (np->type) {
-                case BRCH:
-                    if (np->unodes[0]->scoap.CC0 == -1 || np->unodes[0]->scoap.CC1 == -1) {
-                        done = false;
-                        break;
-                    }
-                    np->scoap.CC0 = np->unodes[0]->scoap.CC0;
-                    np->scoap.CC1 = np->unodes[0]->scoap.CC1;
-                    break;
-                case NOT:
-                    if (np->unodes[0]->scoap.CC0 == -1 || np->unodes[0]->scoap.CC1 == -1) {
-                        done = false;
-                        break;
-                    }
-                    np->scoap.CC0 = np->unodes[0]->scoap.CC1 + 1;
-                    np->scoap.CC1 = np->unodes[0]->scoap.CC0 + 1;
-                    break;
-                case OR:
-                case NOR:
-                case NAND:
-                case AND:
-                    for (int j = 0; j < (int)np->fin; j++) {
-                        if (np->unodes[j]->scoap.CC0 == -1 || np->unodes[j]->scoap.CC1 == -1) {
-                            done = false;
-                            v0.clear();
-                            v1.clear();
-                            break;
-                        }
-                        v0.push_back(np->unodes[j]->scoap.CC0);
-                        v1.push_back(np->unodes[j]->scoap.CC1);
-                    }
-                    if (!v0.empty()) {
-                        if (np->type == OR) {
-                            np->scoap.CC0 = 1 + std::accumulate(v0.begin(), v0.end(), 0);
-                            np->scoap.CC1 = 1 + *std::min_element(v1.begin(), v1.end());
-                        } else if (np->type == NOR) {
-                            np->scoap.CC1 = 1 + std::accumulate(v0.begin(), v0.end(), 0);
-                            np->scoap.CC0 = 1 + *std::min_element(v1.begin(), v1.end());
-                        } else if (np->type == NAND) {
-                            np->scoap.CC1 = 1 + *std::min_element(v0.begin(), v0.end());
-                            np->scoap.CC0 = 1 + std::accumulate(v1.begin(), v1.end(), 0);
-                        } else if (np->type == AND) {
-                            np->scoap.CC0 = 1 + *std::min_element(v0.begin(), v0.end());
-                            np->scoap.CC1 = 1 + std::accumulate(v1.begin(), v1.end(), 0);
-                        }
-                    }
-                    break;
-                default:
-                    break;
-            }
-        }
-    }
-
-    done = false;
-    int co_iters = 0;
-    while (!done) {
-        if (++co_iters > Nnodes + 1) break;
-        done = true;
-        for (int i = 0; i < Nnodes; i++) {
-            NSTRUC *np = &Node[i];
-            if (np->scoap.CO == big_number) {
-                done = false;
-                continue;
-            }
-            for (int j = 0; j < (int)np->fin; j++) {
-                NSTRUC *in = np->unodes[j];
-                int contrib = np->scoap.CO + cost_other_non_controlling(np, j);
-                if (np->type != BRCH) contrib += 1;
-                if (contrib < in->scoap.CO) {
-                    in->scoap.CO = contrib;
-                    done = false;
-                }
-            }
-        }
-    }
-}
-
-static bool dlag_write_tp_output_file(const char *outfile, const std::vector<int> &assign) {
+/*=====================================================================
+ *              Output file writing
+ *===================================================================*/
+static bool write_tp_file(const char *outfile, const std::vector<int> &assign) {
     FILE *fd = fopen(outfile, "w");
     if (!fd) return false;
-
     std::vector<std::pair<int,int>> ordered;
     ordered.reserve(Npi);
     for (int i = 0; i < Npi; i++) ordered.push_back({(int)Pinput[i]->num, i});
     std::sort(ordered.begin(), ordered.end());
-
     for (int i = 0; i < (int)ordered.size(); i++) {
         if (i) fprintf(fd, ",");
         fprintf(fd, "%d", ordered[i].first);
     }
     fprintf(fd, "\n");
-
     for (int i = 0; i < (int)ordered.size(); i++) {
         if (i) fprintf(fd, ",");
         fprintf(fd, "%c", print_3val(assign[ordered[i].second]));
@@ -446,22 +910,58 @@ static bool dlag_write_tp_output_file(const char *outfile, const std::vector<int
     return true;
 }
 
+/*=====================================================================
+ *              Phase 4 option parsing for the DLAG command
+ *              Usage: DLAG <node> <sa 0/1> <outfile> [-df nl|nh|lh|cc]
+ *                                                   [-jf v0]
+ *===================================================================*/
+static void parse_dlag_options(const char *args) {
+    g_opts = DalgOptions{};
+    if (!args) return;
+    std::vector<std::string> toks;
+    std::string cur;
+    for (const char *p = args; *p; ++p) {
+        if (*p == ' ' || *p == '\t') {
+            if (!cur.empty()) { toks.push_back(cur); cur.clear(); }
+        } else cur.push_back(*p);
+    }
+    if (!cur.empty()) toks.push_back(cur);
+
+    for (size_t i = 0; i < toks.size(); i++) {
+        if (toks[i] == "-df" && i + 1 < toks.size()) {
+            const std::string &s = toks[++i];
+            if      (s == "nl") g_opts.df_sel = DalgOptions::DF_NL;
+            else if (s == "nh") g_opts.df_sel = DalgOptions::DF_NH;
+            else if (s == "lh") g_opts.df_sel = DalgOptions::DF_LH;
+            else if (s == "cc") g_opts.df_sel = DalgOptions::DF_CC;
+        } else if (toks[i] == "-jf" && i + 1 < toks.size()) {
+            const std::string &s = toks[++i];
+            if (s == "v0") g_opts.jf_sel = DalgOptions::JF_V0;
+        }
+    }
+}
+
+/*=====================================================================
+ *              Top-level DLAG command
+ *===================================================================*/
 void dlag() {
     int fault_num, sa_val;
     char outfile[MAXLINE];
+    char rest[MAXLINE];
+    rest[0] = '\0';
     rstrip(cp);
 
-    if (sscanf(cp, "%d %d %1023s", &fault_num, &sa_val, outfile) != 3) {
-        printf("Invalid Input!\n");
-        return;
-    }
-    if (sa_val != 0 && sa_val != 1) {
-        printf("Invalid Input!\n");
-        return;
-    }
+    int n = sscanf(cp, "%d %d %1023s %1023[^\n]",
+                   &fault_num, &sa_val, outfile, rest);
+    if (n < 3) { printf("Invalid Input!\n"); return; }
+    if (sa_val != 0 && sa_val != 1) { printf("Invalid Input!\n"); return; }
 
+    parse_dlag_options(n >= 4 ? rest : nullptr);
+
+    // (Re)build topology and index maps (cheap, cached where possible).
     idx_of_num.clear();
     for (int i = 0; i < Nnodes; i++) idx_of_num[(int)Node[i].num] = i;
+    build_topo_cache();
 
     if (idx_of_num.find(fault_num) == idx_of_num.end()) {
         FILE *fd = fopen(outfile, "w");
@@ -470,45 +970,30 @@ void dlag() {
         return;
     }
 
+    // Compute SCOAP if not already available (needed by heuristics).
     bool need_scoap = false;
     for (int i = 0; i < Nnodes; i++) {
-        if (Node[i].scoap.CC0 <= 0 || Node[i].scoap.CC1 <= 0 || Node[i].scoap.CO < 0) {
-            need_scoap = true;
-            break;
-        }
+        if (Node[i].scoap.CC0 <= 0 || Node[i].scoap.CC1 <= 0 ||
+            Node[i].scoap.CO  <  0) { need_scoap = true; break; }
     }
-    if (need_scoap) {
-        dlag_compute_scoap_internal();
-    }
+    if (need_scoap) dlag_compute_scoap_internal();
 
-    std::vector<int> order = dlag_build_relevant_pi_order(fault_num);
+    std::vector<int> pi_bin;
+    bool ok = dalg_generate_test(fault_num, sa_val, pi_bin);
 
-    std::vector<int> solution;
-    dlag_search_start = clock();
-
-    // Fast guided-random attempt first.
-    if (!dlag_try_guided_random(order, fault_num, sa_val, solution)) {
-        std::vector<int> assign(Npi, LX);
-        backtrack_count = 0;
-        (void)dlag_backtrack_search(order, 0, assign, fault_num, sa_val, solution);
-    }
-
-    if (solution.empty()) {
+    if (!ok) {
+        // Redundant (or untestable under backtrack limit) -> empty tp file.
         FILE *fd = fopen(outfile, "w");
-        if (!fd) {
-            printf("Cannot open output file!\n");
-            return;
-        }
+        if (!fd) { printf("Cannot open output file!\n"); return; }
         fclose(fd);
         printf("==> OK");
         return;
     }
 
-    std::vector<int> ternary = dlag_compress_to_ternary(solution, fault_num, sa_val);
-    if (!dlag_write_tp_output_file(outfile, ternary)) {
+    std::vector<int> tern = dlag_compress_to_ternary(pi_bin, fault_num, sa_val);
+    if (!write_tp_file(outfile, tern)) {
         printf("Cannot open output file!\n");
         return;
     }
-
     printf("==> OK");
 }
