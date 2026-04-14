@@ -33,7 +33,7 @@ void help(){
     printf(" detect saturation and run deterministic approaches for the remaining faults \n");
     printf("SCOAP - ");
     printf("Lists controllability and observability values for all possible lines/nodes in a netlist \n");
-    printf("DLAG - ");
+    printf("dalG - ");
     printf("Generate a test pattern for fault using the D-Algorithm \n");
     printf("PODEM - ");
     printf("Generate a test pattern for fault using the PODEM Algorithm \n");

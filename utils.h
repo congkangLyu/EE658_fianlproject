@@ -12,7 +12,7 @@ std::string gname(int tp);
 
 /* String utilities - rstrip only */
 
-/* Gate evaluation - used by logicsim, rfl, pfs, pode, dlag */
+/* Gate evaluation - used by logicsim, rfl, pfs, pode, dalg */
 int eval_gate_from_inputs(NSTRUC *np, const std::vector<int> &val);
 
 /* String trimming - used by multiple commands */

@@ -10,7 +10,7 @@
 #include "pfs.h"
 #include "tpfc.h"
 #include "scoap.h"
-#include "dlag.h"
+#include "dalg.h"
 #include "podem.h"
 #include "tpg.h"
 #include <stdio.h>

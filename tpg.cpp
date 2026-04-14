@@ -16,17 +16,17 @@
 #include <sstream>
 #include <string>
 
-// Structures and forward declarations for DLAG and PODEM helpers
-struct DlagSimResult { std::vector<int> good; std::vector<int> faulty; };
+// Structures and forward declarations for dalG and PODEM helpers
+struct dalgSimResult { std::vector<int> good; std::vector<int> faulty; };
 
-extern int dlag_node_index_by_num(int node_num);
-extern DlagSimResult dlag_simulate_pattern(const std::vector<int> &assign, int fault_node_num, int stuck_at);
-extern bool dlag_pattern_detects_fault(const std::vector<int> &assign, int fault_node_num, int stuck_at);
-extern bool dlag_can_still_activate(const std::vector<int> &assign, int fault_node_num, int stuck_at);
-extern bool dlag_has_possible_propagation(const std::vector<int> &assign, int fault_node_num, int stuck_at);
-extern bool dlag_backtrack_search(const std::vector<int> &order, int depth, std::vector<int> &assign, int fault_node_num, int stuck_at, std::vector<int> &solution);
-extern std::vector<int> dlag_compress_to_ternary(const std::vector<int> &binary_assign, int fault_node_num, int stuck_at);
-extern void dlag_compute_scoap_internal();
+extern int dalg_node_index_by_num(int node_num);
+extern dalgSimResult dalg_simulate_pattern(const std::vector<int> &assign, int fault_node_num, int stuck_at);
+extern bool dalg_pattern_detects_fault(const std::vector<int> &assign, int fault_node_num, int stuck_at);
+extern bool dalg_can_still_activate(const std::vector<int> &assign, int fault_node_num, int stuck_at);
+extern bool dalg_has_possible_propagation(const std::vector<int> &assign, int fault_node_num, int stuck_at);
+extern bool dalg_backtrack_search(const std::vector<int> &order, int depth, std::vector<int> &assign, int fault_node_num, int stuck_at, std::vector<int> &solution);
+extern std::vector<int> dalg_compress_to_ternary(const std::vector<int> &binary_assign, int fault_node_num, int stuck_at);
+extern void dalg_compute_scoap_internal();
 extern bool simulate_circuit(int fault_node_num, int sa_val);
 extern bool fault_at_po();
 extern bool fault_activated(int fault_idx, int sa_val);
@@ -55,7 +55,7 @@ static bool run_dalg_internal(int fault_node_num, int sa_val, std::vector<int> &
             need_scoap = true; break;
         }
     }
-    if (need_scoap) dlag_compute_scoap_internal();
+    if (need_scoap) dalg_compute_scoap_internal();
 
     std::vector<int> order(Npi);
     for (int i = 0; i < Npi; i++) order[i] = i;
@@ -70,10 +70,10 @@ static bool run_dalg_internal(int fault_node_num, int sa_val, std::vector<int> &
 
     std::vector<int> assign(Npi, LX);
     std::vector<int> solution;
-    bool ok = dlag_backtrack_search(order, 0, assign, fault_node_num, sa_val, solution);
+    bool ok = dalg_backtrack_search(order, 0, assign, fault_node_num, sa_val, solution);
     if (!ok) return false;
 
-    tp_out = dlag_compress_to_ternary(solution, fault_node_num, sa_val);
+    tp_out = dalg_compress_to_ternary(solution, fault_node_num, sa_val);
     return true;
 }
 
@@ -98,7 +98,7 @@ static bool run_podem_internal(int fault_node_num, int sa_val, std::vector<int> 
 // Ternary/binary fault simulation wrapper: does "assign" detect node@sa?
 static inline bool tpg_pattern_detects(const std::vector<int> &assign,
                                        int fault_node_num, int sa_val) {
-    return dlag_pattern_detects_fault(assign, fault_node_num, sa_val);
+    return dalg_pattern_detects_fault(assign, fault_node_num, sa_val);
 }
 
 // A simple single-fault single-pattern check loop used to just detect number of faults
@@ -383,7 +383,7 @@ void tpg() {
                 need_scoap = true; break;
             }
         }
-        if (need_scoap) dlag_compute_scoap_internal();
+        if (need_scoap) dalg_compute_scoap_internal();
     }
 
     // Apply fault ordering heuristic to the remaining fault list.

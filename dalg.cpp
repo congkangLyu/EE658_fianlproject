@@ -1,4 +1,4 @@
-#include "dlag.h"
+#include "dalg.h"
 #include "globals.h"
 #include "utils.h"
 #include "static_helpers.h"
@@ -15,6 +15,9 @@
 #include <functional>
 #include <deque>
 
+/*=====================================================================
+ *                        5-valued logic primitives
+ *===================================================================*/
 enum Val5 { VV0 = 0, VV1 = 1, VVX = 2, VVD = 3, VVDB = 4 };
 
 static inline int good_of(int v) {
@@ -137,7 +140,7 @@ static int eval5_gate(NSTRUC *np, const std::vector<int> &val) {
 }
 
 /*=====================================================================
- *                  Topology cache (built once per dlag() call)
+ *                  Topology cache (built once per dalg() call)
  *===================================================================*/
 struct TopoCache {
     std::vector<std::vector<int>> by_level; // nodes grouped by level
@@ -162,7 +165,7 @@ static void build_topo_cache() {
     g_topo.valid = true;
 }
 
-int dlag_node_index_by_num(int node_num) {
+int dalg_node_index_by_num(int node_num) {
     auto it = idx_of_num.find(node_num);
     if (it == idx_of_num.end()) return -1;
     return it->second;
@@ -193,7 +196,7 @@ static int cost_other_non_controlling(NSTRUC *np, int index) {
     return cost;
 }
 
-void dlag_compute_scoap_internal() {
+void dalg_compute_scoap_internal() {
     if (!g_topo.valid) build_topo_cache();
     int big = std::numeric_limits<int>::max() / 4;
 
@@ -733,7 +736,7 @@ static void build_fault_cone(int fault_idx) {
 static bool dalg_generate_test(int fault_num, int stuck_at, std::vector<int> &pi_out) {
     pi_out.assign(Npi, LX);
 
-    int fault_idx = dlag_node_index_by_num(fault_num);
+    int fault_idx = dalg_node_index_by_num(fault_num);
     if (fault_idx < 0) return false;
 
     // Initialize state
@@ -779,12 +782,12 @@ static bool dalg_generate_test(int fault_num, int stuck_at, std::vector<int> &pi
 /*=====================================================================
  *              Legacy 3-valued simulation helpers (for tpg.cpp)
  *===================================================================*/
-struct DlagSimResult { std::vector<int> good; std::vector<int> faulty; };
+struct dalgSimResult { std::vector<int> good; std::vector<int> faulty; };
 
-DlagSimResult dlag_simulate_pattern(const std::vector<int> &assign,
+dalgSimResult dalg_simulate_pattern(const std::vector<int> &assign,
                                     int fault_node_num, int stuck_at) {
     if (!g_topo.valid) build_topo_cache();
-    DlagSimResult res;
+    dalgSimResult res;
     res.good.assign(Nnodes, LX);
     res.faulty.assign(Nnodes, LX);
 
@@ -814,9 +817,9 @@ DlagSimResult dlag_simulate_pattern(const std::vector<int> &assign,
     return res;
 }
 
-bool dlag_pattern_detects_fault(const std::vector<int> &assign,
+bool dalg_pattern_detects_fault(const std::vector<int> &assign,
                                 int fault_node_num, int stuck_at) {
-    DlagSimResult s = dlag_simulate_pattern(assign, fault_node_num, stuck_at);
+    dalgSimResult s = dalg_simulate_pattern(assign, fault_node_num, stuck_at);
     for (int i = 0; i < Npo; i++) {
         int idx = Poutput[i]->indx;
         int g = s.good[idx], f = s.faulty[idx];
@@ -826,18 +829,18 @@ bool dlag_pattern_detects_fault(const std::vector<int> &assign,
 }
 
 // Kept for tpg.cpp compatibility. Not used by the new search.
-bool dlag_can_still_activate(const std::vector<int> &assign,
+bool dalg_can_still_activate(const std::vector<int> &assign,
                              int fault_node_num, int stuck_at) {
-    int fi = dlag_node_index_by_num(fault_node_num);
+    int fi = dalg_node_index_by_num(fault_node_num);
     if (fi < 0) return false;
-    DlagSimResult s = dlag_simulate_pattern(assign, fault_node_num, stuck_at);
+    dalgSimResult s = dalg_simulate_pattern(assign, fault_node_num, stuck_at);
     int g = s.good[fi], f = s.faulty[fi];
     if (g != LX && f != LX && g != f) return true;
     return (g == LX || f == LX);
 }
-bool dlag_has_possible_propagation(const std::vector<int> &assign,
+bool dalg_has_possible_propagation(const std::vector<int> &assign,
                                    int fault_node_num, int stuck_at) {
-    DlagSimResult s = dlag_simulate_pattern(assign, fault_node_num, stuck_at);
+    dalgSimResult s = dalg_simulate_pattern(assign, fault_node_num, stuck_at);
     for (int i = 0; i < Npo; i++) {
         int idx = Poutput[i]->indx;
         int g = s.good[idx], f = s.faulty[idx];
@@ -850,7 +853,7 @@ bool dlag_has_possible_propagation(const std::vector<int> &assign,
 /*=====================================================================
  *              Ternary compression (keeps old Phase 3 behavior)
  *===================================================================*/
-std::vector<int> dlag_compress_to_ternary(const std::vector<int> &binary_assign,
+std::vector<int> dalg_compress_to_ternary(const std::vector<int> &binary_assign,
                                           int fault_node_num, int stuck_at) {
     std::vector<int> out = binary_assign;
     // Drop the "most expensive" PIs first for a better ternary result.
@@ -866,16 +869,16 @@ std::vector<int> dlag_compress_to_ternary(const std::vector<int> &binary_assign,
         int oldv = out[i];
         if (oldv == LX) continue;
         out[i] = LX;
-        if (!dlag_pattern_detects_fault(out, fault_node_num, stuck_at)) out[i] = oldv;
+        if (!dalg_pattern_detects_fault(out, fault_node_num, stuck_at)) out[i] = oldv;
     }
     return out;
 }
 
 /*=====================================================================
- *              Legacy wrapper: dlag_backtrack_search
+ *              Legacy wrapper: dalg_backtrack_search
  *              (called by tpg.cpp). Delegates to the new D-algorithm.
  *===================================================================*/
-bool dlag_backtrack_search(const std::vector<int> & /*order*/,
+bool dalg_backtrack_search(const std::vector<int> & /*order*/,
                            int /*depth*/,
                            std::vector<int> &assign,
                            int fault_node_num,
@@ -911,11 +914,11 @@ static bool write_tp_file(const char *outfile, const std::vector<int> &assign) {
 }
 
 /*=====================================================================
- *              Phase 4 option parsing for the DLAG command
- *              Usage: DLAG <node> <sa 0/1> <outfile> [-df nl|nh|lh|cc]
+ *              Phase 4 option parsing for the dalG command
+ *              Usage: dalG <node> <sa 0/1> <outfile> [-df nl|nh|lh|cc]
  *                                                   [-jf v0]
  *===================================================================*/
-static void parse_dlag_options(const char *args) {
+static void parse_dalg_options(const char *args) {
     g_opts = DalgOptions{};
     if (!args) return;
     std::vector<std::string> toks;
@@ -942,9 +945,9 @@ static void parse_dlag_options(const char *args) {
 }
 
 /*=====================================================================
- *              Top-level DLAG command
+ *              Top-level dalG command
  *===================================================================*/
-void dlag() {
+void dalg() {
     int fault_num, sa_val;
     char outfile[MAXLINE];
     char rest[MAXLINE];
@@ -956,7 +959,7 @@ void dlag() {
     if (n < 3) { printf("Invalid Input!\n"); return; }
     if (sa_val != 0 && sa_val != 1) { printf("Invalid Input!\n"); return; }
 
-    parse_dlag_options(n >= 4 ? rest : nullptr);
+    parse_dalg_options(n >= 4 ? rest : nullptr);
 
     // (Re)build topology and index maps (cheap, cached where possible).
     idx_of_num.clear();
@@ -976,7 +979,7 @@ void dlag() {
         if (Node[i].scoap.CC0 <= 0 || Node[i].scoap.CC1 <= 0 ||
             Node[i].scoap.CO  <  0) { need_scoap = true; break; }
     }
-    if (need_scoap) dlag_compute_scoap_internal();
+    if (need_scoap) dalg_compute_scoap_internal();
 
     std::vector<int> pi_bin;
     bool ok = dalg_generate_test(fault_num, sa_val, pi_bin);
@@ -990,7 +993,7 @@ void dlag() {
         return;
     }
 
-    std::vector<int> tern = dlag_compress_to_ternary(pi_bin, fault_num, sa_val);
+    std::vector<int> tern = dalg_compress_to_ternary(pi_bin, fault_num, sa_val);
     if (!write_tp_file(outfile, tern)) {
         printf("Cannot open output file!\n");
         return;

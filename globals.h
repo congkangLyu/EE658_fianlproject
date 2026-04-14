@@ -93,7 +93,7 @@ void dfs();
 void pfs();
 void tpfc();
 void scoap();
-void dlag();
+void dalg();
 void podem();
 void tpg();
 
