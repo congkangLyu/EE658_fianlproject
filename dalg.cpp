@@ -476,10 +476,12 @@ static bool xpath_to_po_exists() {
 struct DalgOptions {
     enum DFSel { DF_DEFAULT, DF_NL, DF_NH, DF_LH, DF_CC } df_sel = DF_DEFAULT;
     enum JFSel { JF_DEFAULT, JF_V0 } jf_sel = JF_DEFAULT;
-    int  backtrack_limit = 100000;   // safety cap (XOR-heavy circuits like c1355/c499
+    int  backtrack_limit = 500000;   // safety cap (XOR-heavy circuits like c1355/c499
                                      // are a known weakness of D-algorithm; on those
                                      // this returns false and the caller can fall back
                                      // to PODEM)
+    int  recursion_limit = 50000;    // max recursion depth before bailing out (keeps us
+                                     // well under typical 8MB stack for any circuit)
 };
 static DalgOptions g_opts;
 
@@ -543,6 +545,15 @@ static bool error_at_any_po() {
  *              Recursive D-Algorithm core
  *===================================================================*/
 static long g_bt_count = 0;
+static int  g_rec_depth = 0;
+static bool g_aborted   = false;   // once true, every frame returns false ASAP
+
+// RAII guard so we never forget to decrement the depth counter when a frame
+// exits early (any return path, including after a failed recursive call).
+struct DepthGuard {
+    DepthGuard()  { ++g_rec_depth; }
+    ~DepthGuard() { --g_rec_depth; }
+};
 
 static bool dalg_recursive();
 
@@ -667,7 +678,19 @@ static bool propagate_d_frontier() {
                     continue; // try next D-frontier gate
                 }
             }
-            // NOT/BRCH or XOR with no X-inputs: just recurse.
+            // NOT/BRCH (or XOR with no X-inputs): re-evaluate from inputs and
+            // assign the result directly. If this single-input gate is still in
+            // the D-frontier, imply has not yet propagated through it — do it
+            // now, otherwise a plain recursion would see the same state and
+            // loop forever.
+            int ev = eval5_gate(np, g_st.val);
+            if (ev == VVX) {
+                // No way to make progress from here: inputs don't yet force a
+                // value. Drop this candidate and try the next.
+                restore_to(cp);
+                continue;
+            }
+            if (!assign_and_imply(gidx, ev)) { restore_to(cp); continue; }
             if (dalg_recursive()) return true;
             restore_to(cp);
             continue;
@@ -688,7 +711,12 @@ static bool propagate_d_frontier() {
 }
 
 static bool dalg_recursive() {
-    if (++g_bt_count > g_opts.backtrack_limit) return false;
+    if (g_aborted) return false;   // fast unwind once the backtrack budget fires
+    DepthGuard _dg;
+    // recursion_limit is a stack-safety cap: it aborts THIS path only so the
+    // search can try sibling alternatives instead of crashing.
+    if (g_rec_depth > g_opts.recursion_limit) return false;
+    if (++g_bt_count > g_opts.backtrack_limit) { g_aborted = true; return false; }
 
     // (1) Pruning: X-path must still exist unless error already at PO.
     if (!error_at_any_po() && !xpath_to_po_exists()) return false;
@@ -748,6 +776,8 @@ static bool dalg_generate_test(int fault_num, int stuck_at, std::vector<int> &pi
     g_st.stuck_at = stuck_at;
     build_fault_cone(fault_idx);
     g_bt_count = 0;
+    g_rec_depth = 0;
+    g_aborted = false;
 
     // Inject the error: set val[fault] = D or D'.
     NSTRUC *fn = &Node[fault_idx];
