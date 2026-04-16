@@ -2,6 +2,7 @@
 #include "globals.h"
 #include "utils.h"
 #include "static_helpers.h"
+#include "pfs.h"
 #include <stdio.h>
 #include <cstdlib>
 #include <cstring>
@@ -111,28 +112,32 @@ static inline bool tpg_pattern_detects(const std::vector<int> &assign,
     return dalg_pattern_detects_fault(assign, fault_node_num, sa_val);
 }
 
-// A simple single-fault single-pattern check loop used to just detect number of faults
-// after a new test pattern is added. For baseline we just reuse the
-// good/faulty simulator that already handles ternary X values.
+// Count how many of the currently remaining faults are detected by `assign`.
+// Uses bit-parallel fault simulation for speed — up to 63 faults per pass.
+// `assign` is expected in PI order (same convention as dalg_simulate_pattern):
+// assign[i] is the value for Pinput[i].  flist is not modified.
 static int num_detect_faults(const std::vector<int> &assign,
                                      std::vector<std::pair<int,int>> &flist) {
-    std::vector<std::pair<int,int>> kept;
-    kept.reserve(flist.size());
-    for (auto &f : flist) {
-        if (tpg_pattern_detects(assign, f.first, f.second)) kept.push_back(f);
-    }
-    return kept.size();
+    if (flist.empty()) return 0;
+    std::vector<char> detected;
+    pfs_detect_batch(assign, flist, detected);
+    int cnt = 0;
+    for (size_t i = 0; i < detected.size(); i++) if (detected[i]) cnt++;
+    return cnt;
 }
 
-// A simple single-fault single-pattern check loop used to drop detected faults
-// after a new test pattern is added. For baseline we just reuse the
-// good/faulty simulator that already handles ternary X values.
+// Drop every fault in `flist` that is detected by `assign` using bit-parallel
+// fault simulation (PFS).  `assign` is in PI order (see above).  Short-circuits
+// on an empty list.
 static void tpg_drop_detected_faults(const std::vector<int> &assign,
                                      std::vector<std::pair<int,int>> &flist) {
+    if (flist.empty()) return;
+    std::vector<char> detected;
+    pfs_detect_batch(assign, flist, detected);
     std::vector<std::pair<int,int>> kept;
     kept.reserve(flist.size());
-    for (auto &f : flist) {
-        if (!tpg_pattern_detects(assign, f.first, f.second)) kept.push_back(f);
+    for (size_t i = 0; i < flist.size(); i++) {
+        if (!detected[i]) kept.push_back(flist[i]);
     }
     flist.swap(kept);
 }
@@ -455,7 +460,7 @@ void tpg() {
     double fc = total_faults ? (100.0 * covered / total_faults) : 0.0;
 
     auto end_full = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed_full = end_full- start_full;
+    std::chrono::duration<double> elapsed_full = end_full - start_full;
 
     const char *fo_name = (fo_mode == FO_RFL) ? "rfl" :
                           (fo_mode == FO_SCOAP_EASY) ? "scoap_easy" :
@@ -465,4 +470,3 @@ void tpg() {
            rtpg_ver, fo_name, (int)final_tps.size(), fc, covered, total_faults, elapsed_rtpg.count(), elapsed_full.count());
     printf("==> OK");
 }
-

@@ -315,3 +315,173 @@ void pfs() {
 
     printf("==> OK");
 }
+
+/*=====================================================================
+ * pfs_detect_batch
+ *
+ * In-memory parallel fault simulation for use by TPG.
+ *
+ *   pi_pattern  : size == Npi, binary values indexed so pi_pattern[i]
+ *                 corresponds to Pinput[i].  Non-0/1 values are treated
+ *                 as 0 (matches existing pfs() behavior).
+ *   faults      : list of (node_num, sa_val) to check simultaneously.
+ *   is_detected : output, same size as `faults`, is_detected[k] == 1
+ *                 iff the fault at faults[k] is detected by pi_pattern.
+ *
+ * Does NOT perform any file I/O and does NOT modify the caller's fault
+ * list.  One call = one test pattern, all faults checked via bit-parallel
+ * simulation packing up to (word_bits - 1) faults per circuit pass.
+ *===================================================================*/
+void pfs_detect_batch(const std::vector<int> &pi_pattern,
+                      const std::vector<std::pair<int,int>> &faults,
+                      std::vector<char> &is_detected) {
+    is_detected.assign(faults.size(), 0);
+    if (faults.empty()) return;
+
+    // Find max level (circuit should already be levelized by readckt/lev).
+    int max_level = 0;
+    for (int i = 0; i < Nnodes; i++) {
+        if ((int)Node[i].level > max_level) max_level = (int)Node[i].level;
+    }
+
+    using Word = unsigned long long;
+    const int W = (int)(sizeof(Word) * 8);        // 64 bits
+    const int KMAX = W - 1;                       // bit 0 = good, bits 1..W-1 = faults
+    const int F = (int)faults.size();
+
+    auto make_mask = [&](int bits) -> Word {
+        if (bits >= W) return (Word)~(Word)0;
+        return ((Word)1 << bits) - (Word)1;
+    };
+
+    // Resolve (node_num -> index) once.  If the global idx_of_num is
+    // already populated and consistent, reuse it; otherwise build local.
+    std::unordered_map<int,int> local_idx;
+    const std::unordered_map<int,int> *idx_map = nullptr;
+    if ((int)idx_of_num.size() == Nnodes) {
+        idx_map = &idx_of_num;
+    } else {
+        local_idx.reserve((size_t)Nnodes * 2);
+        for (int i = 0; i < Nnodes; i++) local_idx[(int)Node[i].num] = i;
+        idx_map = &local_idx;
+    }
+
+    std::vector<Word> val((size_t)Nnodes, 0);
+    std::vector<Word> force0((size_t)Nnodes, 0);
+    std::vector<Word> force1((size_t)Nnodes, 0);
+
+    for (int base = 0; base < F; base += KMAX) {
+        const int K = std::min(KMAX, F - base);   // faults in this pass
+        const int bits = K + 1;                   // + 1 good bit
+        const Word MASK = make_mask(bits);
+
+        std::fill(val.begin(), val.end(), (Word)0);
+        std::fill(force0.begin(), force0.end(), (Word)0);
+        std::fill(force1.begin(), force1.end(), (Word)0);
+
+        // Build force masks for this batch of faults.
+        for (int j = 0; j < K; j++) {
+            int node_num = faults[base + j].first;
+            int sa_val   = faults[base + j].second;
+            auto it = idx_map->find(node_num);
+            if (it == idx_map->end()) continue;
+            int idx = it->second;
+            Word bitmask = ((Word)1 << (j + 1));   // bit0 is good
+            if (sa_val == 0) force0[idx] |= bitmask;
+            else             force1[idx] |= bitmask;
+        }
+
+        // Initialize PI words: replicate good binary value into all bits.
+        for (int p = 0; p < Npi; p++) {
+            int idx = (int)Pinput[p]->indx;
+            int gv  = (p < (int)pi_pattern.size()) ? pi_pattern[p] : 0;
+            if (gv != 0 && gv != 1) gv = 0;       // X -> 0 (match pfs())
+            Word w = gv ? MASK : (Word)0;
+            w = (w & ~force0[idx]) | force1[idx];
+            val[idx] = w & MASK;
+        }
+
+        // Simulate level-by-level (same structure as pfs()).
+        for (int l = 0; l <= max_level; l++) {
+            for (int i = 0; i < Nnodes; i++) {
+                NSTRUC *np = &Node[i];
+                if ((int)np->level != l) continue;
+                if (np->ntype == PI) continue;
+
+                Word outv = 0;
+
+                if (np->ntype == FB) {
+                    outv = (np->fin > 0) ? val[np->unodes[0]->indx] : 0;
+                } else {
+                    auto inw = [&](int k) -> Word {
+                        return val[np->unodes[k]->indx];
+                    };
+                    switch (np->type) {
+                        case BRCH:
+                        case BUF:
+                            outv = (np->fin > 0) ? inw(0) : 0;
+                            break;
+                        case NOT:
+                            outv = (np->fin > 0) ? ((~inw(0)) & MASK) : 0;
+                            break;
+                        case AND: {
+                            outv = MASK;
+                            for (int k = 0; k < (int)np->fin; k++) outv &= inw(k);
+                            outv &= MASK;
+                            break;
+                        }
+                        case NAND: {
+                            Word t = MASK;
+                            for (int k = 0; k < (int)np->fin; k++) t &= inw(k);
+                            outv = (~t) & MASK;
+                            break;
+                        }
+                        case OR: {
+                            outv = 0;
+                            for (int k = 0; k < (int)np->fin; k++) outv |= inw(k);
+                            outv &= MASK;
+                            break;
+                        }
+                        case NOR: {
+                            Word t = 0;
+                            for (int k = 0; k < (int)np->fin; k++) t |= inw(k);
+                            outv = (~t) & MASK;
+                            break;
+                        }
+                        case XOR: {
+                            Word t = 0;
+                            if (np->fin > 0) {
+                                t = inw(0);
+                                for (int k = 1; k < (int)np->fin; k++) t ^= inw(k);
+                            }
+                            outv = t & MASK;
+                            break;
+                        }
+                        default:
+                            outv = 0;
+                            break;
+                    }
+                }
+
+                outv = (outv & ~force0[i]) | force1[i];
+                val[i] = outv & MASK;
+            }
+        }
+
+        // Detect: any PO where fault-bit differs from good-bit (bit 0).
+        Word detected_bits = 0;
+        for (int k = 0; k < Npo; k++) {
+            int po_idx = (int)Poutput[k]->indx;
+            Word y = val[po_idx] & MASK;
+            Word good = (y & 1) ? MASK : (Word)0;
+            Word diff = (y ^ good) & MASK;
+            detected_bits |= (diff >> 1);          // align fault bits to [0..K-1]
+        }
+
+        for (int j = 0; j < K; j++) {
+            if (detected_bits & ((Word)1 << j)) {
+                is_detected[base + j] = 1;
+            }
+        }
+    }
+}
