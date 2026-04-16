@@ -16,13 +16,21 @@ make
 ./simulator
 ```
 
+## Generic Command Usage
+```
+READ ../ckts/<ckt>.ckt
+TPG <dalg/podem> <rtpg_version> fc_report_cktname.txt
+```
+
 ## RTP-v1 Command Usage
 ```
-TPG atpg-v1 75 <pfs/dfs> atpg_tp_cktname.txt fc_report_cktname.txt
+READ ../ckts/c17.ckt
+TPG <dalg/podem> 1 fc_report_cktname.txt
 ```
+
 ## RTP-v3 Command Usage
 ```
-TPG atpg-v3 75 <pfs/dfs> atpg_tp_cktname.txt fc_report_cktname.txt
+TPG <dalg/podem> 3 fc_report_cktname.txt
 ```
 
 ## Testing

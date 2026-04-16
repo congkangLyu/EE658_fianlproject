@@ -37,4 +37,8 @@ void help(){
     printf("Generate a test pattern for fault using the D-Algorithm \n");
     printf("PODEM - ");
     printf("Generate a test pattern for fault using the PODEM Algorithm \n");
+    printf("TPG - ");
+    printf("Generate test patterns for a circuit given constraints (see README)\n");
+    printf("DTPFC - ");
+    printf("Same as TPFC but reads the test patterns from a file instead \n");
 }

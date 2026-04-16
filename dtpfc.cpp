@@ -1,4 +1,4 @@
-#include "tpfc.h"
+#include "dtpfc.h"
 #include "globals.h"
 #include "readckt.h"
 #include "utils.h"
@@ -17,9 +17,7 @@
 #include <functional>
 #include "static_helpers.h"
 
-
-
- static std::vector<std::vector<int>> controlling_helper (int controlling_value, NSTRUC *np){
+static std::vector<std::vector<int>> controlling_helper (int controlling_value, NSTRUC *np){
     std::vector<int> controlling;
     std::vector<int> non_controlling;
     std::vector<std::vector<int>> temp;
@@ -64,13 +62,14 @@
         temp.swap(swapped);
     }
     return temp;
- }
+}
 
- static int cost_other_non_controlling (NSTRUC *np, int index) {
+static int cost_other_non_controlling (NSTRUC *np, int index) {
     int cost = 0;
     switch (np->type) {
         case NOT:
         case BRCH:
+        case BUF:
             break;
         case XOR:
             // NOT IN NETLISTS
@@ -94,30 +93,29 @@
             exit(-1);
     }   
     return cost;
- }
+}
 
-
-void tpfc(){
-    // TPFC <tp-count> <freq> <output-tp-file> <report-file>
+void dtpfc() {
+    // DTPFC <tp-fname> <freq> <tpfc-report-fname>
     rstrip(cp);
 
-    int ntot = 0;
     int freq = 0;
     char tpfile[MAXLINE];
     char repfile[MAXLINE];
+    char buf[MAXLINE];
 
-    if (sscanf(cp, "%d %d %1023s %1023s", &ntot, &freq, tpfile, repfile) != 4) {
+    if (sscanf(cp, "%1023s %d %1023s", tpfile, &freq, repfile) != 3) {
         printf("Invalid Input!\n");
         return;
     }
-    if (ntot <= 0 || freq <= 0) {
+    if (freq <= 0) {
         printf("Invalid Input!\n");
         return;
     }
 
-    FILE *fd_tp = fopen(tpfile, "w");
+    FILE *fd_tp = fopen(tpfile, "r");
     if (!fd_tp) {
-        printf("Cannot open output tp file!\n");
+        printf("Cannot open input tp file!\n");
         return;
     }
     FILE *fd_rep = fopen(repfile, "w");
@@ -134,24 +132,6 @@ void tpfc(){
         printf("==> OK");
         return;
     }
-
-    std::vector<int> pi_nums;
-    pi_nums.reserve(Npi);
-    std::unordered_map<int, NSTRUC*> pi_map;  // num -> PI node*
-    pi_map.reserve(Npi * 2);
-
-    for (int i = 0; i < Npi; i++) {
-        int id = (int)Pinput[i]->num;
-        pi_nums.push_back(id);
-        pi_map[id] = Pinput[i];
-    }
-    std::sort(pi_nums.begin(), pi_nums.end());
-
-    for (int i = 0; i < (int)pi_nums.size(); i++) {
-        if (i) fprintf(fd_tp, ",");
-        fprintf(fd_tp, "%d", pi_nums[i]);
-    }
-    fprintf(fd_tp, "\n");
 
     auto enc_fault = [](int node_num, int sa_val) -> unsigned long long {
         // sa_val expected 0 or 1
@@ -180,21 +160,65 @@ void tpfc(){
     std::unordered_set<unsigned long long> detected;
     detected.reserve((size_t)total_faults * 2);
 
+    // 1) read header (PI ids line)
+    std::string line;
+    if (!read_full_line(fd_tp, line)) {
+        printf("Empty input file!\n");
+        fclose(fd_tp);
+        fclose(fd_rep);
+        return;
+    }
+
+    // parse PI IDs from line (comma separated)
+    std::vector<int> pi_ids;
+    {
+        std::stringstream ss(line);
+        std::string tok;
+        while (std::getline(ss, tok, ',')) {
+            tok.erase(0, tok.find_first_not_of(" \t"));
+            tok.erase(tok.find_last_not_of(" \t") + 1);
+            if (!tok.empty()) pi_ids.push_back(std::atoi(tok.c_str()));
+        }
+    }
+
     int generated = 0;
     int last_interval_detected = 0;
 
-    for (int t = 1; t <= ntot; t++) {
+    std::string line_acc;
+    line_acc.reserve(4096);
 
-        std::vector<int> pi_vals(Npi, 0);
-        for (int i = 0; i < Npi; i++) {
-            pi_vals[i] = std::rand() & 1; // 0/1
+    while (fgets(buf, MAXLINE, fd_tp)) {
+        // accumulate fragments until we see a newline -> one full pattern line
+        line_acc += buf;
+
+        // if this chunk didn't include '\n', line is not complete yet
+        if (strchr(buf, '\n') == NULL && !feof(fd_tp)) {
+            continue;
         }
 
-        for (int i = 0; i < Npi; i++) {
-            if (i) fprintf(fd_tp, ",");
-            fprintf(fd_tp, "%c", pi_vals[i] ? '1' : '0');
+        // Now we have a full line in line_acc (maybe last line w/o '\n' also ok)
+        // Copy into a mutable C buffer for strtok_r
+        // Strip trailing \r\n and spaces using your trim_inplace
+        std::vector<char> tmp(line_acc.begin(), line_acc.end());
+        tmp.push_back('\0');
+
+        trim_inplace(tmp.data());
+        if (tmp[0] == '\0') {
+            line_acc.clear();
+            continue;
         }
-        fprintf(fd_tp, "\n");
+
+        std::vector<int> pi_vals;
+        pi_vals.reserve(Npi);
+        
+        char *saveptr = NULL;
+        char *tok = strtok_r(tmp.data(), ",", &saveptr);
+        while (tok) {
+            trim_inplace(tok);
+            pi_vals.push_back(parse_3val(tok));
+            tok = strtok_r(NULL, ",", &saveptr);
+        }
+
         generated++;
 
         for (int i = 0; i < Nnodes; i++) {
@@ -235,8 +259,8 @@ void tpfc(){
 
                 switch (np->type) {
                     case BRCH:
-                    case BUF:
                     case NOT:
+                    case BUF:
                         np->fault_list = np->unodes[0]->fault_list;
                         break;
 
@@ -272,7 +296,7 @@ void tpfc(){
             add_fault_vec(detected, Poutput[k]->fault_list);
         }
 
-        if (t % freq == 0) {
+        if (generated % freq == 0) {
             double cov = 100.0 * (double)detected.size() / (double)total_faults;
             fprintf(fd_rep, "%.2f\n", cov);
 
@@ -283,6 +307,7 @@ void tpfc(){
             // }
             last_interval_detected = now;
         }
+        line_acc.clear();
     }
 
     if (generated % freq != 0) {

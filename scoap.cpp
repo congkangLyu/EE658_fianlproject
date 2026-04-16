@@ -69,6 +69,7 @@
     switch (np->type) {
         case NOT:
         case BRCH:
+        case BUF:
             break;
         case XOR:
             // NOT IN NETLISTS
@@ -132,9 +133,15 @@ void scoap() {
             if (np->ntype == PI) continue;
 
             gate_tp = np->type;
+            bool ready = true;
 
             switch (gate_tp) {
                 case BRCH:
+                case BUF:
+                    if (!np->unodes[0]) {
+                        printf("Null fanin at node %d\n", np->num);
+                        exit(1);
+                    }
                     if (np->unodes[0]->scoap.CC0 == -1 || np->unodes[0]->scoap.CC1 == -1) {
                             done = 0;
                             break;
@@ -149,25 +156,31 @@ void scoap() {
                     for (j = 0; j < np->fin; j++) {
                         if (np->unodes[j]->scoap.CC0 == -1 || np->unodes[j]->scoap.CC1 == -1) {
                             done = 0;
+                            ready = false;
                             break;
                         }
                         v0.push_back(np->unodes[j]->scoap.CC0);
                         v1.push_back(np->unodes[j]->scoap.CC1);
                     }
-                    np->scoap.CC0 = 1 +  std::accumulate(v0.begin(), v0.end(), 0);
-                    np->scoap.CC1 = 1 + *std::min_element(v1.begin(), v1.end());
+                    if ( ready ) {
+                        np->scoap.CC0 = 1 +  std::accumulate(v0.begin(), v0.end(), 0);
+                        np->scoap.CC1 = 1 + *std::min_element(v1.begin(), v1.end());
+                    }
                     break; 
                 case NOR:
                     for (j = 0; j < np->fin; j++) {
                         if (np->unodes[j]->scoap.CC0 == -1 || np->unodes[j]->scoap.CC1 == -1) {
                             done = 0;
+                            ready = false;
                             break;
                         }
                         v0.push_back(np->unodes[j]->scoap.CC0);
                         v1.push_back(np->unodes[j]->scoap.CC1);
                     }
-                    np->scoap.CC1 = 1 +  std::accumulate(v0.begin(), v0.end(), 0);
-                    np->scoap.CC0 = 1 + *std::min_element(v1.begin(), v1.end());
+                    if ( ready ) {
+                        np->scoap.CC1 = 1 +  std::accumulate(v0.begin(), v0.end(), 0);
+                        np->scoap.CC0 = 1 + *std::min_element(v1.begin(), v1.end());
+                    }
                     break;
                 case NOT:
                     np->scoap.CC0 = np->unodes[0]->scoap.CC1 + 1;
@@ -177,25 +190,31 @@ void scoap() {
                     for (j = 0; j < np->fin; j++) {
                         if (np->unodes[j]->scoap.CC0 == -1 || np->unodes[j]->scoap.CC1 == -1) {
                             done = 0;
+                            ready = false;
                             break;
                         }
                         v0.push_back(np->unodes[j]->scoap.CC0);
                         v1.push_back(np->unodes[j]->scoap.CC1);
                     }
-                    np->scoap.CC1 = 1 + *std::min_element(v0.begin(), v0.end());
-                    np->scoap.CC0 = 1 + std::accumulate(v1.begin(), v1.end(), 0);
+                    if ( ready ) {
+                        np->scoap.CC1 = 1 + *std::min_element(v0.begin(), v0.end());
+                        np->scoap.CC0 = 1 + std::accumulate(v1.begin(), v1.end(), 0);
+                    }
                     break;
                 case AND:
                     for (j = 0; j < np->fin; j++) {
                         if (np->unodes[j]->scoap.CC0 == -1 || np->unodes[j]->scoap.CC1 == -1) {
                             done = 0;
+                            ready = false;
                             break;
                         }
                         v0.push_back(np->unodes[j]->scoap.CC0);
                         v1.push_back(np->unodes[j]->scoap.CC1);
                     }
-                    np->scoap.CC0 = 1 + *std::min_element(v0.begin(), v0.end());
-                    np->scoap.CC1 = 1 + std::accumulate(v1.begin(), v1.end(), 0);
+                    if ( ready ) {
+                        np->scoap.CC0 = 1 + *std::min_element(v0.begin(), v0.end());
+                        np->scoap.CC1 = 1 + std::accumulate(v1.begin(), v1.end(), 0);
+                    }
                     break;
                 default:
                     printf("Unknown node type!\n");

@@ -45,6 +45,7 @@ int eval_gate_from_inputs(NSTRUC *np, const std::vector<int> &val) {
 
     switch (np->type) {
         case BRCH:
+        case BUF:
             return in(0);
 
         case NOT:

@@ -59,6 +59,7 @@ static int eval_gate_3val(NSTRUC *np) {
     };
     switch (np->type) {
         case BRCH:
+        case BUF:
             return (fin > 0) ? in(0) : VX;
         case NOT:
             if (fin <= 0) return VX;

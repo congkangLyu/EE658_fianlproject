@@ -22,4 +22,5 @@ add_executable(simulator
     podem.cpp
     tpg.cpp
     utils.cpp
+    dtpfc.cpp
 )

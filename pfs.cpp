@@ -222,6 +222,7 @@ void pfs() {
 
                         switch (np->type) {
                             case BRCH:
+                            case BUF:
                                 outv = (np->fin > 0) ? inw(0) : 0;
                                 break;
                             case NOT:

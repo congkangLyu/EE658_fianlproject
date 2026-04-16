@@ -480,8 +480,10 @@ struct DalgOptions {
                                      // are a known weakness of D-algorithm; on those
                                      // this returns false and the caller can fall back
                                      // to PODEM)
-    int  recursion_limit = 50000;    // max recursion depth before bailing out (keeps us
-                                     // well under typical 8MB stack for any circuit)
+    int  recursion_limit = 4000;     // max recursion depth before bailing out. Each
+                                     // frame is ~0.5-1KB (locals + a small vector), so
+                                     // 4000 ≈ 4MB of stack worst-case, safely under the
+                                     // typical 8MB soft cap on Linux.
 };
 static DalgOptions g_opts;
 

@@ -36,5 +36,6 @@ struct cmdstruc command[NUMFUNCS] = {
    {"SCOAP", scoap, CKTLD},
    {"DALG", dalg, CKTLD},
    {"PODEM", podem, CKTLD},
-   {"TPG", tpg, CKTLD}
+   {"TPG", tpg, CKTLD},
+   {"DTPFC", dtpfc, CKTLD},
 };

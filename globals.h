@@ -17,7 +17,7 @@
 #define Upcase(x) ((isalpha(x) && islower(x))? toupper(x) : (x))
 #define Lowcase(x) ((isalpha(x) && isupper(x))? tolower(x) : (x))
 
-#define NUMFUNCS 15
+#define NUMFUNCS 16
 
 /* Three-valued logic constants */
 static const int L0 = 0;
@@ -28,7 +28,7 @@ static const int LX = 2;
 enum e_com {READ, PC, HELP, QUIT, LEV, LOGICSIM, RTPG, RFL, DFS, PFS, TPFC, SCOAP, DALG, PODEM, TPG};
 enum e_state {EXEC, CKTLD};         /* Gstate values */
 enum e_ntype {GATE, PI, FB, PO};    /* column 1 of circuit format */
-enum e_gtype {IPT, BRCH, XOR, OR, NOR, NOT, NAND, AND};  /* gate types */
+enum e_gtype {IPT, BRCH, XOR, OR, NOR, NOT, NAND, AND, XNOR, BUF};  /* gate types */
 
 struct Scoap {
     int CC0;
@@ -96,5 +96,6 @@ void scoap();
 void dalg();
 void podem();
 void tpg();
+void dtpfc();
 
 #endif /* GLOBALS_H */

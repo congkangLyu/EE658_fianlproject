@@ -71,6 +71,7 @@
     switch (np->type) {
         case NOT:
         case BRCH:
+        case BUF:
             break;
         case XOR:
             // NOT IN NETLISTS
