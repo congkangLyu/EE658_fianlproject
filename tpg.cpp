@@ -27,6 +27,8 @@ extern bool dalg_has_possible_propagation(const std::vector<int> &assign, int fa
 extern bool dalg_backtrack_search(const std::vector<int> &order, int depth, std::vector<int> &assign, int fault_node_num, int stuck_at, std::vector<int> &solution);
 extern std::vector<int> dalg_compress_to_ternary(const std::vector<int> &binary_assign, int fault_node_num, int stuck_at);
 extern void dalg_compute_scoap_internal();
+extern void dalg_set_backtrack_limit(int limit);
+extern int  dalg_get_backtrack_limit();
 extern bool simulate_circuit(int fault_node_num, int sa_val);
 extern bool fault_at_po();
 extern bool fault_activated(int fault_idx, int sa_val);
@@ -45,8 +47,7 @@ static bool run_dalg_internal(int fault_node_num, int sa_val, std::vector<int> &
     tp_out.clear();
     if (sa_val != 0 && sa_val != 1) return false;
 
-    idx_of_num.clear();
-    for (int i = 0; i < Nnodes; i++) idx_of_num[(int)Node[i].num] = i;
+    // idx_of_num is already built by the TPG main function; skip redundant rebuild.
     if (idx_of_num.find(fault_node_num) == idx_of_num.end()) return false;
 
     bool need_scoap = false;
@@ -73,7 +74,13 @@ static bool run_dalg_internal(int fault_node_num, int sa_val, std::vector<int> &
     bool ok = dalg_backtrack_search(order, 0, assign, fault_node_num, sa_val, solution);
     if (!ok) return false;
 
-    tp_out = dalg_compress_to_ternary(solution, fault_node_num, sa_val);
+    // In TPG context: skip ternary compression (it weakens fault dropping)
+    // and fill unspecified PIs with random binary values so the pattern
+    // can detect additional faults during fault dropping.
+    tp_out = solution;
+    for (int i = 0; i < (int)tp_out.size(); i++) {
+        if (tp_out[i] == LX) tp_out[i] = std::rand() & 1;
+    }
     return true;
 }
 
@@ -82,8 +89,7 @@ static bool run_podem_internal(int fault_node_num, int sa_val, std::vector<int> 
     tp_out.clear();
     if (sa_val != 0 && sa_val != 1) return false;
 
-    idx_of_num.clear();
-    for (int i = 0; i < Nnodes; i++) idx_of_num[(int)Node[i].num] = i;
+    // idx_of_num already built by TPG main; skip redundant rebuild.
     auto it = idx_of_num.find(fault_node_num);
     if (it == idx_of_num.end()) return false;
 
@@ -91,7 +97,11 @@ static bool run_podem_internal(int fault_node_num, int sa_val, std::vector<int> 
     bool ok = podem_rec(it->second, sa_val);
     if (!ok) return false;
 
+    // Fill X's with random values for better fault dropping.
     tp_out = pi_assign;
+    for (int i = 0; i < (int)tp_out.size(); i++) {
+        if (tp_out[i] == LX) tp_out[i] = std::rand() & 1;
+    }
     return true;
 }
 
@@ -387,6 +397,12 @@ void tpg() {
 
     // Step C: Deterministic ATPG stage on remaining faults.
 
+    // Lower the DALG backtrack limit for TPG: hard/redundant faults that
+    // cannot be solved quickly are skipped rather than burning 500K backtracks.
+    const int TPG_BACKTRACK_LIMIT = 10000;
+    int saved_bt_limit = dalg_get_backtrack_limit();
+    dalg_set_backtrack_limit(TPG_BACKTRACK_LIMIT);
+
     // Ensure SCOAP values are computed when needed for fault ordering.
     if (fo_mode == FO_SCOAP_EASY || fo_mode == FO_SCOAP_HARD) {
         bool need_scoap = false;
@@ -426,6 +442,9 @@ void tpg() {
         // printf("Fault Coverage (ATPG): %f\n", fc);
         if ( fc > FC_LIM ) break;
     }
+
+    // Restore original backtrack limit.
+    dalg_set_backtrack_limit(saved_bt_limit);
 
     if (!tpg_write_tp_file(outfile, final_tps)) {
         printf("Cannot open output file!\n");

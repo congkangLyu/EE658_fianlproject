@@ -487,6 +487,13 @@ struct DalgOptions {
 };
 static DalgOptions g_opts;
 
+// Allow TPG to temporarily lower the backtrack budget for faster overall
+// test-generation.  Restores the previous value on destruction.
+// Called by TPG to temporarily lower the backtrack budget.
+void dalg_set_backtrack_limit(int limit) { g_opts.backtrack_limit = limit; }
+int  dalg_get_backtrack_limit()          { return g_opts.backtrack_limit; }
+
+
 static int select_d_frontier_gate() {
     if (g_st.d_frontier.empty()) return -1;
     int best = -1;
