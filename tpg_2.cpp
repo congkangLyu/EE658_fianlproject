@@ -399,7 +399,7 @@ void tpg() {
 
     // Lower the DALG backtrack limit for TPG: hard/redundant faults that
     // cannot be solved quickly are skipped rather than burning 500K backtracks.
-    const int TPG_BACKTRACK_LIMIT = 10000;
+    const int TPG_BACKTRACK_LIMIT = 500;
     int saved_bt_limit = dalg_get_backtrack_limit();
     dalg_set_backtrack_limit(TPG_BACKTRACK_LIMIT);
 
