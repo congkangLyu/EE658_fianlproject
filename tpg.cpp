@@ -292,12 +292,24 @@ void tpg() {
 
     // Step B: RTPG stage (binary patterns).
     if ( rtpg_ver == 1) {
+        int no_progress = 0;
+        // Cap: stop RTPG after this many consecutive patterns that detect
+        // zero new faults.  Prevents infinite loop when random coverage
+        // saturates below rtpg_fc_limit.
+        const int MAX_NO_PROGRESS = 10 * total_faults;
         while ( !flist.empty() ) {
             std::vector<int> pat(Npi, 0);
             for (int i = 0; i < Npi; i++) pat[i] = std::rand() & 1;
             if (std::find(final_tps.begin(), final_tps.end(), pat) != final_tps.end()) continue;
+            int prev_sz = (int)flist.size();
             final_tps.push_back(pat);
             tpg_drop_detected_faults(pat, flist);
+
+            if ((int)flist.size() == prev_sz) {
+                if (++no_progress >= MAX_NO_PROGRESS) break;  // coverage stalled
+            } else {
+                no_progress = 0;
+            }
 
             covered = total_faults - (int)flist.size();
             double fc = 100.0 * covered / total_faults;
@@ -390,15 +402,17 @@ void tpg() {
     apply_fault_order(flist, fo_mode);
 
     // Iterate over a snapshot so dropping during the loop is safe.
+    // Use a set for O(1) "still_there" lookups instead of O(n) linear scan.
     std::vector<std::pair<int,int>> pending = flist;
+    auto make_key = [](int node, int sa) -> long long { return ((long long)node << 2) | sa; };
     for (const auto &f : pending) {
         if (flist.empty()) break;
-        // skip already dropped faults
-        bool still_there = false;
-        for (const auto &g : flist) {
-            if (g.first == f.first && g.second == f.second) { still_there = true; break; }
-        }
-        if (!still_there) continue;
+        // Rebuild the lookup set from flist (it shrinks after each drop).
+        // This is O(flist) per iteration but avoids O(pending × flist) overall.
+        std::unordered_set<long long> fset;
+        fset.reserve(flist.size());
+        for (const auto &g : flist) fset.insert(make_key(g.first, g.second));
+        if (fset.find(make_key(f.first, f.second)) == fset.end()) continue;
 
         std::vector<int> tp;
         bool ok = use_dalg ? run_dalg_internal(f.first, f.second, tp)
