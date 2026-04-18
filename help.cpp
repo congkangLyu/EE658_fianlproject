@@ -41,4 +41,6 @@ void help(){
     printf("Generate test patterns for a circuit given constraints (see README)\n");
     printf("DTPFC - ");
     printf("Same as TPFC but reads the test patterns from a file instead \n");
+    printf("DFRONT - ");
+    printf("show D-frontier heuristic options for DALG/PODEM (nl|nh|lh|cc)\n");
 }

@@ -38,4 +38,5 @@ struct cmdstruc command[NUMFUNCS] = {
    {"PODEM", podem, CKTLD},
    {"TPG", tpg, CKTLD},
    {"DTPFC", dtpfc, CKTLD},
+   {"DFRONT", dfront, EXEC},
 };

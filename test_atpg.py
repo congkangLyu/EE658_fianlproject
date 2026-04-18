@@ -17,7 +17,7 @@ def load_cmds(ckts, alg):
     return cmds
 
 
-def test_cmd_minickt(ckt, alg, tlim=1):
+def test_cmd_minickt(ckt, alg, tlim=1, df_mode=""):
     """ For all faults of the netlist ckt: 
     Generate cmds for all faults 
     Run the simulator for all these faults 
@@ -29,7 +29,7 @@ def test_cmd_minickt(ckt, alg, tlim=1):
     ckt_res = {"PASS":0, "FAIL":0, "TLIM":0, "GFAIL":0}
     
     # generate cmds for all faults of ckt 
-    cmds = utils_atpg.gen_cmd_atpg_minickt(ckt, alg, faults)
+    cmds = utils_atpg.gen_cmd_atpg_minickt(ckt, alg, faults, df_mode=df_mode)
 
     # run simulator and compare results for each fault 
     for cmd in cmds: 
@@ -104,8 +104,10 @@ def correct_answer(output_fname, golden_df):
 
 
 if __name__ == '__main__':
-    tlim = get_args().tlim
-    alg = get_args().alg
+    args = get_args()
+    tlim = args.tlim
+    alg = args.alg
+    df_mode = args.df
     if alg not in ["dalg", "podem"]:
         raise ValueError(f"Algorithm {alg} is not accepted. ")
     ckts = os.listdir(CIRCUIT_DIR)
@@ -113,7 +115,7 @@ if __name__ == '__main__':
 
     all_res = {"PASS":0, "FAIL":0, "TLIM":0, "GFAIL":0}
     for ckt in cnames:
-        ckt_res = test_cmd_minickt(ckt, alg, tlim)
+        ckt_res = test_cmd_minickt(ckt, alg, tlim, df_mode=df_mode)
         all_res = {key: all_res[key] + ckt_res[key] for key in all_res.keys()}
     print('-'*50)
     

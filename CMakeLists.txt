@@ -19,6 +19,7 @@ add_executable(simulator
     tpfc.cpp
     scoap.cpp
     dalg.cpp
+    dfront.cpp
     podem.cpp
     tpg.cpp
     utils.cpp

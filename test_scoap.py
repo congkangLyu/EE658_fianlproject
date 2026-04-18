@@ -27,15 +27,15 @@ def check_scoap(answer, golden):
 
     for line in answer_result:
         if line and line not in golden_result:
-            print(f"{bcolors.FAIL}\n")
-            print(f"{bcolors.FAIL}\nWrong line in output:")
-            print(f"Error on\n\t{bcolors.FAIL}"+line)
+            print(f"{bcolors.RED}\n")
+            print(f"{bcolors.RED}\nWrong line in output:")
+            print(f"Error on\n\t{bcolors.RED}"+line)
             passed = False
 
     for line in golden_result:
         if line and line not in answer_result:
-            print(f"{bcolors.FAIL}\nMissing line in output:")
-            print(f"{bcolors.FAIL}\t"+line)
+            print(f"{bcolors.RED}\nMissing line in output:")
+            print(f"{bcolors.RED}\t"+line)
             passed = False
 
     return passed
@@ -43,7 +43,7 @@ def check_scoap(answer, golden):
 
 def test_cmd(cmd, tlim=1):
     ckt = cmd.split("_")[0] 
-    msg = f"cd build/; ./simulator < ../{SCOAP_CMD_TESTS_DIR}/{cmd_test} > /dev/null "
+    msg = f"cd build/; ./simulator < ../{SCOAP_CMD_TESTS_DIR}/{cmd} > /dev/null "
     process = subprocess.Popen(msg, shell=True)
     
     current_time=time.time()

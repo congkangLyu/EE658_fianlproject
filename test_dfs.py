@@ -53,7 +53,7 @@ def test_cmd(cmd_test, tlim=1):
         print(f"{bcolors.GRN}[PASS] '{cmd_test.replace('.txt','')}\t({ed_time})' {bcolors.ENDC}")
         return "PASS"
     
-    print(f"{bcolors.RED}[FAIL]: '{cmd.replace('.txt','')}'\t({ed_time}){bcolors.ENDC}")
+    print(f"{bcolors.RED}[FAIL]: '{cmd_test.replace('.txt','')}'\t({ed_time}){bcolors.ENDC}")
     return "FAIL"
 
 

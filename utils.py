@@ -27,8 +27,10 @@ def get_args():
     parser = argparse.ArgumentParser(description ='Which function to test')
     parser.add_argument("-tlim", type=float, default=5,
             help="Time limit in seconds")
-    parser.add_argument("-alg", type=str, 
+    parser.add_argument("-alg", type=str, default="dalg",
             help="ATPG algorithm (DALG/PODEM)")
+    parser.add_argument("-df", type=str, default="",
+            help="Optional decision-frontier mode for ATPG (e.g. XPATH_CHECKING)")
 
     return parser.parse_args()
 

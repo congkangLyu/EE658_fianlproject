@@ -22,24 +22,27 @@ def path_output(ckt, alg, fault_node, fault_val):
     output_fname = f"{output_dir}/{ckt}_{alg}_{fault_node}_{fault_val}.out"
     return output_fname 
 
-def gen_cmd_atpg_single(ckt, alg, fault_node, fault_val):
+def gen_cmd_atpg_single(ckt, alg, fault_node, fault_val, df_mode=""):
     cmd_dir = ATPG_CMD_DIR[alg]
     cmd_fname = path_cmd(ckt, alg, fault_node, fault_val) 
     output_fname = path_output(ckt, alg, fault_node, fault_val) 
     with open(cmd_fname, 'w') as outfile:
         outfile.write(f"READ ../{utils.CIRCUIT_DIR}/{ckt}.ckt\n")
-        outfile.write(f"{alg.upper()} {fault_node} {fault_val} ../{output_fname}\n")
+        line = f"{alg.upper()} {fault_node} {fault_val} ../{output_fname}"
+        if df_mode:
+            line += f" -df {df_mode}"
+        outfile.write(line + "\n")
         outfile.write("QUIT")
     return cmd_fname
 
 
-def gen_cmd_atpg_minickt(ckt, alg, faults=None):
+def gen_cmd_atpg_minickt(ckt, alg, faults=None, df_mode=""):
     if not faults:
         faults = read_fdict(ckt) 
     cmds = []
     for fault in faults: 
         fault_node, fault_val = fault.split("@")
-        cmds.append(gen_cmd_atpg_single(ckt, alg, fault_node, fault_val))
+        cmds.append(gen_cmd_atpg_single(ckt, alg, fault_node, fault_val, df_mode=df_mode))
     return cmds
 
 def read_fdict(ckt):

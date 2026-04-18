@@ -149,9 +149,21 @@ void scoap() {
                     np->scoap.CC0 = np->unodes[0]->scoap.CC0;
                     np->scoap.CC1 = np->unodes[0]->scoap.CC1;
                     break;
-                case XOR:
-                    // NOT IN NETLISTS
+                case XOR: {
+                    int a0 = np->unodes[0]->scoap.CC0;
+                    int a1 = np->unodes[0]->scoap.CC1;
+                    int b0 = np->unodes[1]->scoap.CC0;
+                    int b1 = np->unodes[1]->scoap.CC1;
+
+                    if (a0 == -1 || a1 == -1 || b0 == -1 || b1 == -1) {
+                        done = 0;
+                        break;
+                    }
+
+                    np->scoap.CC0 = 1 + std::min(a0 + b0, a1 + b1);
+                    np->scoap.CC1 = 1 + std::min(a0 + b1, a1 + b0);
                     break;
+                }
                 case OR:
                     for (j = 0; j < np->fin; j++) {
                         if (np->unodes[j]->scoap.CC0 == -1 || np->unodes[j]->scoap.CC1 == -1) {
@@ -183,6 +195,10 @@ void scoap() {
                     }
                     break;
                 case NOT:
+                    if (np->unodes[0]->scoap.CC0 == -1 || np->unodes[0]->scoap.CC1 == -1) {
+                            done = 0;
+                            break;
+                    }
                     np->scoap.CC0 = np->unodes[0]->scoap.CC1 + 1;
                     np->scoap.CC1 = np->unodes[0]->scoap.CC0 + 1;
                     break;
@@ -222,7 +238,6 @@ void scoap() {
             }   
         }
     }
-
     // go backwards thru the circuit to calculate CO
     done = 0;
     while (!done) {

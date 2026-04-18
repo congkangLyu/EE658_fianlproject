@@ -1,6 +1,7 @@
 #include "dalg.h"
 #include "globals.h"
 #include "utils.h"
+#include "dfront.h"
 #include "static_helpers.h"
 
 #include <stdio.h>
@@ -642,18 +643,21 @@ static bool justify_gate(NSTRUC *np) {
 // list (best first) so that the recursion can try alternatives on failure.
 static std::vector<int> ranked_d_frontier() {
     std::vector<int> cands(g_st.d_frontier.begin(), g_st.d_frontier.end());
-    auto key = [](int gidx) -> long long {
-        NSTRUC *np = &Node[gidx];
+    auto map_mode = []() -> DFrontierMode {
         switch (g_opts.df_sel) {
-            case DalgOptions::DF_NL: return (long long) np->num;
-            case DalgOptions::DF_NH: return -(long long) np->num;
-            case DalgOptions::DF_LH: return -(long long) np->level;
-            case DalgOptions::DF_CC: return (long long) np->scoap.CO;
-            default:                 return -(long long) np->level;
+            case DalgOptions::DF_NL: return DF_NL;
+            case DalgOptions::DF_NH: return DF_NH;
+            case DalgOptions::DF_LH: return DF_LH;
+            case DalgOptions::DF_CC: return DF_CC;
+            default:                 return DF_LH;
         }
     };
+    DFrontierMode mode = map_mode();
     std::stable_sort(cands.begin(), cands.end(),
-                     [&](int a, int b){ return key(a) < key(b); });
+                     [&](int a, int b){
+                         return dfront_priority(&Node[a], mode)
+                              < dfront_priority(&Node[b], mode);
+                     });
     return cands;
 }
 

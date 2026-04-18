@@ -1,6 +1,7 @@
 #include "podem.h"
 #include "globals.h"
 #include "utils.h"
+#include "dfront.h"
 #include <stdio.h>
 #include <cstdlib>
 #include <cstring>
@@ -9,6 +10,8 @@
 #include <unordered_map>
 #include <limits>
 #include <numeric>
+
+static DFrontierMode g_podem_df_mode = DF_BASELINE;
 
 void simulate_circuit(int fault_node_num, int sa_val) {
     good_val.assign(Nnodes, LX);
@@ -120,9 +123,7 @@ bool get_objective(int fault_idx, int sa_val, NSTRUC* &obj_node, int &obj_val) {
     std::vector<NSTRUC*> df = get_d_frontier();
     if (df.empty()) return false;
 
-    std::sort(df.begin(), df.end(), [](NSTRUC *a, NSTRUC *b) {
-        return a->scoap.CO < b->scoap.CO;
-    });
+    df = dfront_ranked(df, g_podem_df_mode);
 
     NSTRUC *g = df[0];
     int want = non_controlling_value(g);
@@ -253,12 +254,16 @@ static int all_fanins_ready(NSTRUC *np) {
 void podem() {
     int fault_num, sa_val;
     char outfile[MAXLINE];
+    char rest[MAXLINE];
+    rest[0] = '\0';
     rstrip(cp);
 
-    if (sscanf(cp, "%d %d %1023s", &fault_num, &sa_val, outfile) != 3) {
+    int n = sscanf(cp, "%d %d %1023s %1023[^\n]", &fault_num, &sa_val, outfile, rest);
+    if (n < 3) {
         printf("Invalid Input!\n");
         return;
     }
+    g_podem_df_mode = dfront_mode_from_args(n >= 4 ? rest : nullptr);
     if (sa_val != 0 && sa_val != 1) {
         printf("Invalid Input!\n");
         return;

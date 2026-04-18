@@ -13,6 +13,7 @@
 #include "dalg.h"
 #include "podem.h"
 #include "tpg.h"
+#include "dfront.h"
 #include <stdio.h>
 #include <cstdlib>
 #include <cstring>

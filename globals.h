@@ -17,7 +17,7 @@
 #define Upcase(x) ((isalpha(x) && islower(x))? toupper(x) : (x))
 #define Lowcase(x) ((isalpha(x) && isupper(x))? tolower(x) : (x))
 
-#define NUMFUNCS 16
+#define NUMFUNCS 17
 
 /* Three-valued logic constants */
 static const int L0 = 0;
@@ -25,7 +25,7 @@ static const int L1 = 1;
 static const int LX = 2;
 
 /* Enums */
-enum e_com {READ, PC, HELP, QUIT, LEV, LOGICSIM, RTPG, RFL, DFS, PFS, TPFC, SCOAP, DALG, PODEM, TPG};
+enum e_com {READ, PC, HELP, QUIT, LEV, LOGICSIM, RTPG, RFL, DFS, PFS, TPFC, SCOAP, DALG, PODEM, TPG, DTPFC, DFRONT};
 enum e_state {EXEC, CKTLD};         /* Gstate values */
 enum e_ntype {GATE, PI, FB, PO};    /* column 1 of circuit format */
 enum e_gtype {IPT, BRCH, XOR, OR, NOR, NOT, NAND, AND, XNOR, BUF};  /* gate types */
@@ -97,5 +97,6 @@ void dalg();
 void podem();
 void tpg();
 void dtpfc();
+void dfront();
 
 #endif /* GLOBALS_H */
