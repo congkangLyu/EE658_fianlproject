@@ -459,4 +459,21 @@ void tpg() {
     podem_set_backtrack_limit(saved_podem_bt_limit);
 
     if (!tpg_write_tp_file(outfile, final_tps)) {
-        printf("Cannot open outpu
+        printf("Cannot open output file!\n");
+        return;
+    }
+
+    covered = total_faults - (int)flist.size();
+    double fc = total_faults ? (100.0 * covered / total_faults) : 0.0;
+
+    auto end_full = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed_full = end_full - start_full;
+
+    const char *fo_name = (fo_mode == FO_RFL) ? "rfl" :
+                          (fo_mode == FO_SCOAP_EASY) ? "scoap_easy" :
+                          (fo_mode == FO_SCOAP_HARD) ? "scoap_hard" : "none";
+    printf("TPG: alg=%s rtpg_ver=%d fo=%s tps=%d FC=%.2f%% (%d/%d), RTPG time=%fs, full time=%fs\n",
+           use_dalg ? "DALG" : "PODEM",
+           rtpg_ver, fo_name, (int)final_tps.size(), fc, covered, total_faults, elapsed_rtpg.count(), elapsed_full.count());
+    printf("==> OK");
+}

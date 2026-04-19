@@ -395,6 +395,92 @@ static void refresh_gate_frontiers(int gidx) {
 // Attempt to set val[idx] = newv; returns false on conflict.
 static bool assign_and_imply(int start_idx, int newv, std::deque<int> &queue);
 
+// Try backward implication on gate g: if the output is known and exactly
+// one input is X, deduce that input's value.  Returns false on conflict.
+// If a deduction is made, the deduced node is pushed onto `queue` so
+// forward implication continues from it.
+static bool backward_imply_gate(NSTRUC *g, std::deque<int> &queue) {
+    int gidx = g->indx;
+    int outv = g_st.val[gidx];
+    if (!is_known(outv)) return true;  // output unknown, nothing to deduce
+    int out_good = good_of(outv);
+    if (out_good == LX) return true;
+
+    // Count X-valued inputs
+    int x_count = 0, x_idx = -1;
+    for (int j = 0; j < (int)g->fin; j++) {
+        if (g_st.val[g->unodes[j]->indx] == VVX) {
+            x_count++; x_idx = j;
+        }
+    }
+    if (x_count != 1) return true;  // need exactly one unknown input
+
+    int ctrl = controlling_val(g);
+    int nonctrl = noncontrolling_val(g);
+    bool inv = output_inverts(g);
+    int deduced = -1;  // the 5-value to assign to the unknown input
+
+    if (g->type == NOT) {
+        deduced = (out_good == 0) ? VV1 : VV0;
+    } else if (g->type == BRCH || g->type == BUF) {
+        deduced = (out_good == 0) ? VV0 : VV1;
+    } else if (g->type == XOR) {
+        // XOR with 2 inputs: if output known and one input known, other is determined
+        int other_idx = (x_idx == 0) ? 1 : 0;
+        int ov = good_of(g_st.val[g->unodes[other_idx]->indx]);
+        if (ov != LX) {
+            int need = out_good ^ ov;  // XOR: a = output ^ b
+            deduced = need ? VV1 : VV0;
+        }
+    } else if (g->type == XNOR) {
+        int other_idx = (x_idx == 0) ? 1 : 0;
+        int ov = good_of(g_st.val[g->unodes[other_idx]->indx]);
+        if (ov != LX) {
+            int need = 1 - (out_good ^ ov);  // XNOR: a = ~(output ^ b)
+            deduced = need ? VV1 : VV0;
+        }
+    } else if (ctrl >= 0) {
+        // AND/NAND/OR/NOR
+        int eff_out = inv ? (1 - out_good) : out_good;  // pre-inversion output
+        if (eff_out == nonctrl) {
+            // All inputs must be non-controlling → the X input must be nonctrl
+            deduced = nonctrl ? VV1 : VV0;
+        } else {
+            // eff_out == ctrl: at least one input is controlling.
+            // All other (known) inputs are non-controlling (otherwise the gate
+            // would already evaluate to ctrl and the X input doesn't matter).
+            // Check if all known inputs are indeed non-controlling.
+            bool all_nonctrl = true;
+            for (int j = 0; j < (int)g->fin; j++) {
+                if (j == x_idx) continue;
+                int gv = good_of(g_st.val[g->unodes[j]->indx]);
+                if (gv == ctrl) { all_nonctrl = false; break; }
+            }
+            if (all_nonctrl) {
+                // The X input must be the controlling one
+                deduced = ctrl ? VV1 : VV0;
+            }
+        }
+    }
+
+    if (deduced < 0) return true;  // couldn't deduce
+
+    // Don't overwrite the fault site
+    int target = g->unodes[x_idx]->indx;
+    if (target == g_st.fault_idx) return true;
+
+    int cur = g_st.val[target];
+    if (cur == VVX) {
+        log_val(target, cur);
+        g_st.val[target] = deduced;
+        refresh_gate_frontiers(target);
+        queue.push_back(target);
+    } else if (!compatible(cur, deduced)) {
+        return false;
+    }
+    return true;
+}
+
 // Evaluate forward from an imply queue. Returns false on any conflict.
 static bool imply_forward(std::deque<int> &queue) {
     while (!queue.empty()) {
@@ -416,6 +502,8 @@ static bool imply_forward(std::deque<int> &queue) {
                 int want_g = good_of(cur);
                 if (got_g != LX && want_g != LX && got_g != want_g) return false;
                 refresh_gate_frontiers(gidx);
+                // Backward implication on the fault-site gate's fanin
+                if (!backward_imply_gate(g, queue)) return false;
                 continue;
             }
 
@@ -438,6 +526,15 @@ static bool imply_forward(std::deque<int> &queue) {
                 }
             }
             refresh_gate_frontiers(gidx);
+            // Backward implication: if gate output is now known and one
+            // input is still X, deduce it.
+            if (!backward_imply_gate(g, queue)) return false;
+        }
+
+        // Also try backward implication on the gate that PRODUCES idx
+        // (i.e., idx is the output of some gate whose inputs just changed).
+        if (np->ntype != PI) {
+            if (!backward_imply_gate(np, queue)) return false;
         }
     }
     return true;
