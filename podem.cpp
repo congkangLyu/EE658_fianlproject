@@ -13,6 +13,17 @@
 
 static DFrontierMode g_podem_df_mode = DF_BASELINE;
 
+// Safety cap: counts recursive podem_rec calls and aborts once the budget is
+// exhausted.  XOR-heavy circuits (c1355/c499) or redundant faults can otherwise
+// push PODEM into effectively-exponential search.
+static long g_podem_bt_count = 0;
+static int  g_podem_bt_limit = 200000;
+static bool g_podem_aborted  = false;
+
+void podem_set_backtrack_limit(int limit) { g_podem_bt_limit = limit; }
+int  podem_get_backtrack_limit()          { return g_podem_bt_limit; }
+void podem_reset_search()                 { g_podem_bt_count = 0; g_podem_aborted = false; }
+
 void simulate_circuit(int fault_node_num, int sa_val) {
     good_val.assign(Nnodes, LX);
     bad_val.assign(Nnodes, LX);
@@ -203,6 +214,9 @@ static bool x_path_exists_from_dfrontier() {
 }
 
 bool podem_rec(int fault_idx, int sa_val) {
+    if (g_podem_aborted) return false;
+    if (++g_podem_bt_count > g_podem_bt_limit) { g_podem_aborted = true; return false; }
+
     simulate_circuit((int)Node[fault_idx].num, sa_val);
 
     if (fault_at_po()) {
@@ -288,6 +302,9 @@ void podem() {
     }
 
     pi_assign.assign(Npi, LX);
+    
+    g_podem_bt_count = 0;
+    g_podem_aborted  = false;
 
     bool ok = podem_rec(it->second, sa_val);
 

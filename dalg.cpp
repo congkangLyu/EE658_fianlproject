@@ -179,7 +179,15 @@ static int cost_other_non_controlling(NSTRUC *np, int index) {
     int cost = 0;
     switch (np->type) {
         case NOT: case BRCH: break;
-        case XOR: break; // treat as 0 (not in ISCAS-85 netlists)
+        case XOR: case XNOR:
+            // To observe input[index] through an XOR/XNOR, the other input
+            // must be set to a known value.  The cheapest option is min(CC0, CC1).
+            for (int i = 0; i < (int)np->fin; i++) {
+                if (i == index) continue;
+                cost += std::min(np->unodes[i]->scoap.CC0,
+                                 np->unodes[i]->scoap.CC1);
+            }
+            break;
         case OR: case NOR:
             for (int i = 0; i < (int)np->fin; i++) {
                 if (i == index) continue;
@@ -222,6 +230,27 @@ void dalg_compute_scoap_internal() {
                     np->scoap.CC0 = np->unodes[0]->scoap.CC1 + 1;
                     np->scoap.CC1 = np->unodes[0]->scoap.CC0 + 1;
                     break;
+                case XOR: {
+                    // XOR output=0: both inputs same (00 or 11)
+                    // XOR output=1: inputs differ (01 or 10)
+                    int a0 = np->unodes[0]->scoap.CC0;
+                    int a1 = np->unodes[0]->scoap.CC1;
+                    int b0 = np->unodes[1]->scoap.CC0;
+                    int b1 = np->unodes[1]->scoap.CC1;
+                    np->scoap.CC0 = 1 + std::min(a0 + b0, a1 + b1);
+                    np->scoap.CC1 = 1 + std::min(a0 + b1, a1 + b0);
+                    break;
+                }
+                case XNOR: {
+                    // XNOR is inverted XOR
+                    int a0 = np->unodes[0]->scoap.CC0;
+                    int a1 = np->unodes[0]->scoap.CC1;
+                    int b0 = np->unodes[1]->scoap.CC0;
+                    int b1 = np->unodes[1]->scoap.CC1;
+                    np->scoap.CC1 = 1 + std::min(a0 + b0, a1 + b1);
+                    np->scoap.CC0 = 1 + std::min(a0 + b1, a1 + b0);
+                    break;
+                }
                 case OR: case NOR: case NAND: case AND: {
                     std::vector<int> v0, v1;
                     v0.reserve(np->fin); v1.reserve(np->fin);

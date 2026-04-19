@@ -3,6 +3,7 @@
 #include "utils.h"
 #include "static_helpers.h"
 #include "pfs.h"
+#include "podem.h"
 #include <stdio.h>
 #include <cstdlib>
 #include <cstring>
@@ -95,6 +96,9 @@ static bool run_podem_internal(int fault_node_num, int sa_val, std::vector<int> 
     if (it == idx_of_num.end()) return false;
 
     pi_assign.assign(Npi, LX);
+    // Each fault gets its own backtrack budget; otherwise one hard fault would
+    // starve every later fault.
+    podem_reset_search();
     bool ok = podem_rec(it->second, sa_val);
     if (!ok) return false;
 
@@ -407,6 +411,8 @@ void tpg() {
     const int TPG_BACKTRACK_LIMIT = 500;
     int saved_bt_limit = dalg_get_backtrack_limit();
     dalg_set_backtrack_limit(TPG_BACKTRACK_LIMIT);
+    int saved_podem_bt_limit = podem_get_backtrack_limit();
+    podem_set_backtrack_limit(TPG_BACKTRACK_LIMIT);
 
     // Ensure SCOAP values are computed when needed for fault ordering.
     if (fo_mode == FO_SCOAP_EASY || fo_mode == FO_SCOAP_HARD) {
@@ -448,8 +454,9 @@ void tpg() {
         if ( fc > FC_LIM ) break;
     }
 
-    // Restore original backtrack limit.
+    // Restore original backtrack limits.
     dalg_set_backtrack_limit(saved_bt_limit);
+    podem_set_backtrack_limit(saved_podem_bt_limit);
 
     if (!tpg_write_tp_file(outfile, final_tps)) {
         printf("Cannot open output file!\n");
