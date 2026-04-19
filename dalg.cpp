@@ -490,8 +490,24 @@ static bool xpath_to_po_exists() {
             if (vis[gi]) continue;
             int v = g_st.val[gi];
             if (v == VVX || is_error(v)) {
-                vis[gi] = 1;
-                q.push_back(gi);
+                // Gate-level feasibility: check if any side-input is already
+                // set to the controlling value, which blocks D propagation.
+                bool blocked = false;
+                int ctrl = controlling_val(g);
+                if (ctrl >= 0) {  // AND/NAND/OR/NOR
+                    for (int j = 0; j < (int)g->fin; j++) {
+                        int sidx = g->unodes[j]->indx;
+                        if (sidx == idx) continue;  // skip the input we came from
+                        int sv = g_st.val[sidx];
+                        if (sv != VVX && good_of(sv) == ctrl) {
+                            blocked = true; break;
+                        }
+                    }
+                }
+                if (!blocked) {
+                    vis[gi] = 1;
+                    q.push_back(gi);
+                }
             }
         }
     }
@@ -559,8 +575,19 @@ static int select_j_input(NSTRUC *np) {
         bool pick = false;
         switch (g_opts.jf_sel) {
             case DalgOptions::JF_V0: {
-                int ca = std::min(a->scoap.CC0, a->scoap.CC1);
-                int cb = std::min(b->scoap.CC0, b->scoap.CC1);
+                // Use the cost of the value we're most likely to assign first
+                // (controlling value for the gate), not min(CC0,CC1).
+                int ctrl = controlling_val(np);
+                int ca, cb;
+                if (ctrl == 0) {
+                    ca = a->scoap.CC0; cb = b->scoap.CC0;
+                } else if (ctrl == 1) {
+                    ca = a->scoap.CC1; cb = b->scoap.CC1;
+                } else {
+                    // XOR/NOT/BRCH: fall back to min
+                    ca = std::min(a->scoap.CC0, a->scoap.CC1);
+                    cb = std::min(b->scoap.CC0, b->scoap.CC1);
+                }
                 pick = (ca < cb);
                 break;
             }
